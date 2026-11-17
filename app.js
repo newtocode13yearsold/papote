@@ -221,6 +221,9 @@ async function loadProfile(user) {
   const snap = await getDoc(doc(db, 'users', user.uid));
   if (!snap.exists()) { show('pickScreen'); return; }
   me = { uid: user.uid, username: snap.data().username };
+  // Les couleurs choisies sur un autre appareil reviennent avec le compte
+  if (snap.data().prefs) Theme.set(snap.data().prefs);
+  refreshSettingsUI();
   $('meName').textContent = me.username;
   paintAvatar($('meAvatar'), me.username);
   show('app');
@@ -523,5 +526,82 @@ $('removeBtn').addEventListener('click', () => {
   if (c) removeChat(c, true);
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && openChatId) closeChat();
+  if (e.key === 'Escape' && openChatId && !$('settings').open) closeChat();
 });
+
+// ---------- Personnaliser : mode nuit, couleur, fond, taille ----------
+const Theme = window.PapoteTheme;
+const COLORS = [
+  ['#6d4aff', 'Violet'], ['#2f6bff', 'Bleu'], ['#0ea5b7', 'Turquoise'], ['#16a34a', 'Vert'],
+  ['#eab308', 'Jaune'], ['#f97316', 'Orange'], ['#e5484d', 'Rouge'], ['#ec4899', 'Rose'], ['#475569', 'Gris'],
+];
+
+// Construit les pastilles de couleur (+ une pastille "arc-en-ciel" pour choisir n'importe quelle couleur)
+const swatchBox = $('swatches');
+for (const [hex, name] of COLORS) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'swatch';
+  b.dataset.color = hex;
+  b.style.setProperty('--c', hex);
+  b.title = name;
+  b.setAttribute('aria-label', name);
+  b.onclick = () => setPrefs({ accent: hex });
+  swatchBox.append(b);
+}
+const custom = document.createElement('label');
+custom.className = 'swatch custom';
+custom.title = 'Choisir ma couleur';
+custom.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
+const picker = document.createElement('input');
+picker.type = 'color';
+picker.setAttribute('aria-label', 'Choisir ma propre couleur');
+picker.addEventListener('input', () => setPrefs({ accent: picker.value }));
+custom.append(picker);
+swatchBox.append(custom);
+
+// Met les boutons du panneau à jour (lequel est sélectionné)
+function refreshSettingsUI() {
+  const p = Theme.get();
+  document.querySelectorAll('#themeChoice [data-theme]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.theme === p.theme)));
+  document.querySelectorAll('#sizeChoice [data-size]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.size === p.textSize)));
+  document.querySelectorAll('#walls [data-wall]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.wall === p.wallpaper)));
+  let known = false;
+  swatchBox.querySelectorAll('[data-color]').forEach((b) => {
+    const on = b.dataset.color === p.accent;
+    if (on) known = true;
+    b.setAttribute('aria-pressed', String(on));
+  });
+  custom.setAttribute('aria-pressed', String(!known));
+  picker.value = p.accent;
+}
+
+// Sauvegarde dans le compte (attend un peu, pour ne pas écrire à chaque mouvement du sélecteur)
+let saveTimer;
+function setPrefs(change) {
+  const p = Theme.set(change);
+  refreshSettingsUI();
+  if (!me) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    updateDoc(doc(db, 'users', me.uid), { prefs: p }).catch((err) => console.error('prefs', err));
+  }, 600);
+}
+
+document.querySelectorAll('#themeChoice [data-theme]').forEach((b) => b.addEventListener('click', () => setPrefs({ theme: b.dataset.theme })));
+document.querySelectorAll('#sizeChoice [data-size]').forEach((b) => b.addEventListener('click', () => setPrefs({ textSize: b.dataset.size })));
+document.querySelectorAll('#walls [data-wall]').forEach((b) => b.addEventListener('click', () => setPrefs({ wallpaper: b.dataset.wall })));
+$('resetPrefs').addEventListener('click', () => setPrefs({ ...Theme.DEFAULT }));
+
+// Bouton lune / soleil : passe directement en mode nuit ou jour
+document.querySelectorAll('[data-theme-toggle]').forEach((b) => b.addEventListener('click', () => {
+  setPrefs({ theme: Theme.isDark() ? 'light' : 'dark' });
+}));
+
+const settings = $('settings');
+$('settingsBtn').addEventListener('click', () => { refreshSettingsUI(); settings.showModal(); });
+settings.querySelectorAll('[data-close-settings]').forEach((b) => b.addEventListener('click', () => settings.close()));
+// Toucher en dehors du panneau le ferme
+settings.addEventListener('click', (e) => { if (e.target === settings) settings.close(); });
+
+refreshSettingsUI();

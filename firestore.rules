@@ -9,6 +9,15 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function me() { return request.auth.uid; }
     function validName(n) { return n is string && n.matches('^[A-Za-z0-9_.]{3,20}$'); }
+    function validPrefs(p) {
+      return p is map
+        && p.keys().hasAll(['theme', 'accent', 'wallpaper', 'textSize'])
+        && p.keys().hasOnly(['theme', 'accent', 'wallpaper', 'textSize'])
+        && p.theme in ['auto', 'light', 'dark']
+        && p.accent is string && p.accent.matches('^#[0-9a-f]{6}$')
+        && p.wallpaper in ['none', 'dots', 'grid', 'gradient', 'stars']
+        && p.textSize in ['s', 'm', 'l'];
+    }
 
     // Pseudo -> uid (sert à garantir qu'un pseudo n'est pris qu'une fois)
     match /usernames/{name} {
@@ -33,7 +42,12 @@ service cloud.firestore {
         && request.resource.data.usernameLower == request.resource.data.username.lower()
         && request.resource.data.createdAt == request.time
         && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == me();
-      allow update, delete: if false;
+
+      // On peut seulement changer SES couleurs (mode nuit, couleur, fond, taille du texte)
+      allow update: if signedIn() && uid == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['prefs'])
+        && validPrefs(request.resource.data.prefs);
+      allow delete: if false;
     }
 
     // Une conversation = une amitié entre 2 personnes.
