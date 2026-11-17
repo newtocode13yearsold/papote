@@ -1,0 +1,104 @@
+rules_version = '2';
+
+// Règles de sécurité du chat.
+// Idée : on ne peut lire que SES conversations, et on ne peut écrire
+// des messages que dans une conversation acceptée par les deux amis.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function validName(n) { return n is string && n.matches('^[A-Za-z0-9_.]{3,20}$'); }
+
+    // Pseudo -> uid (sert à garantir qu'un pseudo n'est pris qu'une fois)
+    match /usernames/{name} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == me()
+        && name.matches('^[a-z0-9_.]{3,20}$')
+        && !exists(/databases/$(database)/documents/users/$(me()))
+        && getAfter(/databases/$(database)/documents/users/$(me())).data.usernameLower == name;
+      allow update, delete: if false;
+    }
+
+    // Profil public : seulement le pseudo (l'email n'est JAMAIS stocké ici)
+    match /users/{uid} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() && uid == me()
+        && request.resource.data.keys().hasOnly(['username', 'usernameLower', 'createdAt'])
+        && validName(request.resource.data.username)
+        && request.resource.data.usernameLower == request.resource.data.username.lower()
+        && request.resource.data.createdAt == request.time
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == me();
+      allow update, delete: if false;
+    }
+
+    // Une conversation = une amitié entre 2 personnes.
+    // id = les deux uid triés, séparés par "_"
+    match /chats/{chatId} {
+      function isMember(data) { return me() in data.members; }
+      function other(data) { return data.members[0] == me() ? data.members[1] : data.members[0]; }
+      function nameOf(uid) { return get(/databases/$(database)/documents/users/$(uid)).data.username; }
+
+      allow read: if signedIn() && isMember(resource.data);
+
+      // Demande d'ami
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['members', 'names', 'requestedBy', 'accepted', 'createdAt', 'lastAt', 'lastText', 'lastFrom'])
+        && request.resource.data.members is list
+        && request.resource.data.members.size() == 2
+        && request.resource.data.members[0] < request.resource.data.members[1]
+        && chatId == request.resource.data.members[0] + '_' + request.resource.data.members[1]
+        && isMember(request.resource.data)
+        && request.resource.data.requestedBy == me()
+        && request.resource.data.accepted == false
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.lastAt == request.time
+        && request.resource.data.lastText == ''
+        && request.resource.data.lastFrom == ''
+        && request.resource.data.names.keys().hasOnly(request.resource.data.members)
+        && request.resource.data.names[me()] == nameOf(me())
+        && request.resource.data.names[other(request.resource.data)] == nameOf(other(request.resource.data));
+
+      // Accepter la demande (seulement celui qui l'a reçue)
+      // ou mettre à jour le "dernier message" (seulement un membre, conversation acceptée)
+      allow update: if signedIn() && isMember(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accepted', 'lastAt', 'lastText', 'lastFrom'])
+        && (
+          (resource.data.accepted == false
+            && resource.data.requestedBy != me()
+            && request.resource.data.accepted == true
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accepted']))
+          ||
+          (resource.data.accepted == true
+            && request.resource.data.accepted == true
+            && request.resource.data.lastFrom == me()
+            && request.resource.data.lastAt == request.time
+            && request.resource.data.lastText is string
+            && request.resource.data.lastText.size() <= 1000)
+        );
+
+      // Refuser une demande / retirer un ami
+      allow delete: if signedIn() && isMember(resource.data);
+
+      match /messages/{msgId} {
+        function chat() { return get(/databases/$(database)/documents/chats/$(chatId)).data; }
+
+        allow read: if signedIn() && me() in chat().members;
+        allow create: if signedIn()
+          && me() in chat().members
+          && chat().accepted == true
+          && request.resource.data.keys().hasOnly(['from', 'text', 'at'])
+          && request.resource.data.from == me()
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.at == request.time;
+        allow update, delete: if false;
+      }
+    }
+  }
+}

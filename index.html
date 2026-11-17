@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Papote — discute avec tes amis</title>
+  <meta name="description" content="Papote : crée ton compte avec ton email et un pseudo, ajoute tes amis et discute avec eux en direct.">
+  <meta name="theme-color" content="#6d4aff">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%236d4aff'/><path d='M16 20h32a6 6 0 0 1 6 6v14a6 6 0 0 1-6 6H30l-9 7v-7h-5a6 6 0 0 1-6-6V26a6 6 0 0 1 6-6z' fill='white'/></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Écran de chargement -->
+  <div id="loading" class="screen center">
+    <div class="spinner" aria-label="Chargement"></div>
+  </div>
+
+  <!-- Écran : connexion / inscription -->
+  <main id="authScreen" class="screen center" hidden>
+    <div class="card auth-card">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 5h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-8l-5 4v-4H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>
+        </span>
+        <h1>Papote</h1>
+      </div>
+      <p class="tagline">Discute en direct avec tes amis.</p>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="signup" role="tab" aria-selected="true">Créer un compte</button>
+        <button class="tab" data-tab="login" role="tab" aria-selected="false">Se connecter</button>
+      </div>
+
+      <form id="signupForm" class="form" autocomplete="on">
+        <label>Email
+          <input type="email" name="email" required autocomplete="email" placeholder="toi@exemple.fr">
+        </label>
+        <label>Pseudo
+          <input type="text" name="username" required minlength="3" maxlength="20" pattern="[A-Za-z0-9_.]{3,20}" autocomplete="username" placeholder="ex. thomas_14">
+          <small>3 à 20 caractères : lettres, chiffres, _ ou .</small>
+        </label>
+        <label>Mot de passe
+          <input type="password" name="password" required minlength="6" autocomplete="new-password" placeholder="6 caractères minimum">
+          <small>Il protège ton compte : sans lui, n'importe qui pourrait écrire à ta place.</small>
+        </label>
+        <button class="btn primary" type="submit">Créer mon compte</button>
+      </form>
+
+      <form id="loginForm" class="form" hidden autocomplete="on">
+        <label>Email
+          <input type="email" name="email" required autocomplete="email" placeholder="toi@exemple.fr">
+        </label>
+        <label>Mot de passe
+          <input type="password" name="password" required autocomplete="current-password">
+        </label>
+        <button class="btn primary" type="submit">Se connecter</button>
+        <button class="link" type="button" id="forgotBtn">Mot de passe oublié ?</button>
+      </form>
+
+      <p id="authMsg" class="msg" role="status"></p>
+    </div>
+  </main>
+
+  <!-- Écran : choisir un pseudo (compte créé mais sans pseudo) -->
+  <main id="pickScreen" class="screen center" hidden>
+    <form id="pickForm" class="card auth-card form">
+      <h2>Choisis ton pseudo</h2>
+      <p class="tagline">C'est avec ce pseudo que tes amis vont te trouver.</p>
+      <label>Pseudo
+        <input type="text" name="username" required minlength="3" maxlength="20" pattern="[A-Za-z0-9_.]{3,20}" placeholder="ex. thomas_14">
+      </label>
+      <button class="btn primary" type="submit">Valider</button>
+      <button class="link" type="button" data-logout>Se déconnecter</button>
+      <p id="pickMsg" class="msg" role="status"></p>
+    </form>
+  </main>
+
+  <!-- Écran : l'application -->
+  <div id="app" class="screen app" hidden>
+    <aside class="sidebar" id="sidebar">
+      <header class="side-head">
+        <div class="me">
+          <span class="avatar" id="meAvatar"></span>
+          <div>
+            <strong id="meName"></strong>
+            <small>Connecté</small>
+          </div>
+        </div>
+        <button class="icon-btn" data-logout title="Se déconnecter" aria-label="Se déconnecter">
+          <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+        </button>
+      </header>
+
+      <form id="addForm" class="add-friend">
+        <input type="text" name="username" placeholder="Ajouter un ami (pseudo)" maxlength="20" autocomplete="off" aria-label="Pseudo de ton ami">
+        <button class="btn primary small" type="submit">Ajouter</button>
+      </form>
+      <p id="addMsg" class="msg small-msg" role="status"></p>
+
+      <section id="requestsBox" hidden>
+        <h3>Demandes d'amis</h3>
+        <ul id="requestsList" class="list"></ul>
+      </section>
+
+      <section>
+        <h3>Mes amis</h3>
+        <ul id="friendsList" class="list"></ul>
+        <p id="noFriends" class="empty">Tu n'as pas encore d'amis ici. Ajoute-les avec leur pseudo juste au-dessus.</p>
+      </section>
+    </aside>
+
+    <section class="chat" id="chat">
+      <div class="chat-empty" id="chatEmpty">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-8l-5 4v-4H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>
+        <p>Choisis un ami pour commencer à discuter.</p>
+      </div>
+
+      <div class="chat-inner" id="chatInner" hidden>
+        <header class="chat-head">
+          <button class="icon-btn back" id="backBtn" aria-label="Retour">
+            <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <span class="avatar" id="chatAvatar"></span>
+          <strong id="chatName"></strong>
+          <button class="icon-btn danger" id="removeBtn" title="Retirer cet ami" aria-label="Retirer cet ami">
+            <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+          </button>
+        </header>
+        <div class="messages" id="messages" aria-live="polite"></div>
+        <div class="pending-note" id="pendingNote" hidden></div>
+        <form class="composer" id="sendForm">
+          <textarea name="text" rows="1" maxlength="1000" placeholder="Écris un message…" aria-label="Message"></textarea>
+          <button class="btn primary send" type="submit" aria-label="Envoyer">
+            <svg viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+          </button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
