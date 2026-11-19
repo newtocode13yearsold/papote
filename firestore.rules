@@ -33,9 +33,10 @@ service cloud.firestore {
     }
 
     // Profil public : seulement le pseudo (l'email n'est JAMAIS stocké ici)
+    // Tout le monde (connecté) peut voir la liste des membres pour les ajouter en amis.
     match /users/{uid} {
       allow get: if signedIn();
-      allow list: if false;
+      allow list: if signedIn() && request.query.limit <= 500;
       allow create: if signedIn() && uid == me()
         && request.resource.data.keys().hasOnly(['username', 'usernameLower', 'createdAt'])
         && validName(request.resource.data.username)

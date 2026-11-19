@@ -3,7 +3,7 @@
 Un petit site pour discuter avec ses amis :
 
 1. Crée ton compte avec ton **email**, un **pseudo** et un mot de passe.
-2. Ajoute tes amis avec leur pseudo (ils doivent accepter ta demande).
+2. Ajoute tes amis avec leur pseudo, ou choisis-les dans la liste « Tout le monde » (ils doivent accepter ta demande).
 3. Discute avec eux en direct.
 
 ## Comment ça marche

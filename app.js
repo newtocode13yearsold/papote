@@ -8,7 +8,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, collection, query, where,
-  orderBy, limitToLast, onSnapshot, writeBatch, serverTimestamp, updateDoc,
+  orderBy, limit, limitToLast, onSnapshot, writeBatch, serverTimestamp, updateDoc,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 
@@ -23,7 +23,9 @@ const USERNAME_RE = /^[A-Za-z0-9_.]{3,20}$/;
 let me = null;          // { uid, username }
 let chats = [];         // mes conversations (amis + demandes)
 let openChatId = null;  // conversation ouverte
+let people = [];        // tous les membres inscrits (sauf moi)
 let unsubChats = null;
+let unsubPeople = null;
 let unsubMessages = null;
 
 // ---------- Petits outils ----------
@@ -228,12 +230,15 @@ async function loadProfile(user) {
   paintAvatar($('meAvatar'), me.username);
   show('app');
   listenChats();
+  listenPeople();
 }
 
 function cleanup() {
   unsubChats?.(); unsubChats = null;
+  unsubPeople?.(); unsubPeople = null;
   unsubMessages?.(); unsubMessages = null;
-  me = null; chats = []; openChatId = null;
+  me = null; chats = []; people = []; openChatId = null;
+  $('peopleList').replaceChildren();
   $('app').classList.remove('in-chat');
   $('chatInner').hidden = true;
   $('chatEmpty').hidden = false;
@@ -334,6 +339,97 @@ function renderLists() {
   const unreadCount = friends.filter((c) => c.lastFrom && c.lastFrom !== me.uid && toDate(c.lastAt).getTime() > lastRead(c.id) && c.id !== openChatId).length;
   const total = unreadCount + incoming.length;
   document.title = (total ? `(${total}) ` : '') + 'Papote — discute avec tes amis';
+
+  renderPeople();
+}
+
+// ---------- Tout le monde : tous les comptes créés ----------
+function chatIdWith(uid) { return [me.uid, uid].sort().join('_'); }
+
+function listenPeople() {
+  const q = query(collection(db, 'users'), orderBy('usernameLower'), limit(500));
+  unsubPeople = onSnapshot(q, (snap) => {
+    people = snap.docs
+      .filter((d) => d.id !== me.uid)
+      .map((d) => ({ uid: d.id, username: d.data().username }));
+    renderPeople();
+  }, (err) => {
+    console.error(err);
+    $('noPeople').hidden = false;
+    $('noPeople').textContent = 'Impossible de charger la liste des membres.';
+  });
+}
+
+function renderPeople() {
+  const list = $('peopleList');
+  if (!me) return;
+  list.replaceChildren();
+  // Le champ "Chercher ou ajouter" sert aussi à filtrer la liste
+  const search = $('addForm').username.value.trim().toLowerCase();
+  const shown = people.filter((p) => p.username.toLowerCase().includes(search));
+  $('peopleCount').textContent = people.length ? `(${people.length})` : '';
+
+  for (const p of shown) {
+    const c = chats.find((x) => x.id === chatIdWith(p.uid));
+    const li = document.createElement('li');
+    li.className = 'person';
+    const av = document.createElement('span'); av.className = 'avatar'; paintAvatar(av, p.username);
+    const info = document.createElement('div'); info.className = 'info'; info.textContent = p.username;
+    li.append(av, info);
+
+    if (c?.accepted) {
+      const b = document.createElement('button'); b.className = 'btn ghost tiny'; b.textContent = 'Discuter';
+      b.onclick = () => openChat(c.id);
+      li.append(b);
+    } else if (c && c.requestedBy === me.uid) {
+      const t = document.createElement('span'); t.className = 'tag'; t.textContent = 'Demande envoyée';
+      li.append(t);
+    } else if (c) {
+      const b = document.createElement('button'); b.className = 'btn primary tiny'; b.textContent = 'Accepter';
+      b.onclick = () => acceptRequest(c);
+      li.append(b);
+    } else {
+      const b = document.createElement('button'); b.className = 'btn primary tiny'; b.textContent = 'Ajouter';
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await sendRequest(p.uid, p.username);
+          toast(`Demande envoyée à ${p.username} !`);
+        } catch (err) {
+          console.error(err);
+          b.disabled = false;
+          toast(err.code === 'permission-denied'
+            ? 'Impossible pour le moment. Peut-être que cette personne t’a déjà ajouté : regarde tes demandes.'
+            : friendlyError(err));
+        }
+      };
+      li.append(b);
+    }
+    list.append(li);
+  }
+
+  const empty = $('noPeople');
+  empty.hidden = shown.length > 0;
+  empty.textContent = search
+    ? `Personne ne correspond à « ${search} ».`
+    : 'Personne d’autre ne s’est encore inscrit. Partage le site à tes amis !';
+}
+
+$('addForm').username.addEventListener('input', () => { setMsg($('addMsg'), ''); renderPeople(); });
+
+// Envoie une demande d'ami (crée la conversation, en attente d'acceptation)
+async function sendRequest(uid, otherName) {
+  const members = [me.uid, uid].sort();
+  await setDoc(doc(db, 'chats', members.join('_')), {
+    members,
+    names: { [me.uid]: me.username, [uid]: otherName },
+    requestedBy: me.uid,
+    accepted: false,
+    createdAt: serverTimestamp(),
+    lastAt: serverTimestamp(),
+    lastText: '',
+    lastFrom: '',
+  });
 }
 
 // Ajouter un ami avec son pseudo
@@ -350,8 +446,7 @@ $('addForm').addEventListener('submit', async (e) => {
     const snap = await getDoc(doc(db, 'usernames', name.toLowerCase()));
     if (!snap.exists()) return setMsg(msg, `Personne ne s'appelle « ${name} ».`);
     const uid = snap.data().uid;
-    const members = [me.uid, uid].sort();
-    const chatId = members.join('_');
+    const chatId = chatIdWith(uid);
 
     const existing = chats.find((c) => c.id === chatId);
     if (existing) {
@@ -359,22 +454,15 @@ $('addForm').addEventListener('submit', async (e) => {
       if (existing.requestedBy === me.uid) return setMsg(msg, 'Demande déjà envoyée, attends sa réponse.', true);
       await acceptRequest(existing);
       input.value = '';
+      renderPeople();
       return setMsg(msg, 'Vous êtes maintenant amis !', true);
     }
 
     const other = await getDoc(doc(db, 'users', uid));
     const otherName = other.exists() ? other.data().username : name;
-    await setDoc(doc(db, 'chats', chatId), {
-      members,
-      names: { [me.uid]: me.username, [uid]: otherName },
-      requestedBy: me.uid,
-      accepted: false,
-      createdAt: serverTimestamp(),
-      lastAt: serverTimestamp(),
-      lastText: '',
-      lastFrom: '',
-    });
+    await sendRequest(uid, otherName);
     input.value = '';
+    renderPeople();
     setMsg(msg, `Demande envoyée à ${otherName} !`, true);
   } catch (err) {
     console.error(err);

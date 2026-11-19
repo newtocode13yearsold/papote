@@ -162,6 +162,10 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .request .info { flex: 1; min-width: 0; }
 .request .info small { display: block; color: var(--muted); }
 .request .actions { display: flex; gap: 6px; }
+.person .info { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person .tag { color: var(--muted); font-size: 13px; flex: none; }
+#peopleCount { font-weight: 400; }
+.sidebar > section:last-child { padding-bottom: 16px; }
 .empty { color: var(--muted); font-size: 14px; padding: 0 16px; line-height: 1.5; }
 
 /* ---------- Conversation ---------- */
