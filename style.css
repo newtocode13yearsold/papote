@@ -494,3 +494,68 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
   .walls { grid-template-columns: repeat(5, 1fr); gap: 6px; }
   .wall-tile span { font-size: 10px; }
 }
+
+/* ---------- Groupes ---------- */
+.avatar.group { border-radius: 13px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-right: 16px; }
+.section-head h3 { margin-right: 0; }
+.section-head .btn { margin-top: 12px; }
+.section-head .btn svg { width: 16px; height: 16px; }
+.friend .name .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* En-tête de la conversation : toucher le nom d'un groupe ouvre ses infos */
+.chat-head-info {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+  border: 0; background: none; color: inherit; padding: 2px 4px; margin: -2px -4px; text-align: left; border-radius: 12px;
+}
+.chat-head-info:not(:disabled):hover { background: var(--panel-2); }
+.chat-head-info:disabled { cursor: default; color: inherit; }
+
+/* Pseudo de la personne au-dessus de ses messages, dans un groupe */
+.bubble .sender { font-size: 13px; font-weight: 700; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bubble.media .sender { padding: 4px 8px 2px; }
+
+/* Fenêtre "Nouveau groupe" / infos du groupe */
+.group-body > input[type=text] { margin-top: 0; }
+.group-body .msg { margin-top: 10px; }
+.group-body .settings-note { margin: 0 2px 10px; }
+.inline-row { display: flex; gap: 8px; }
+.inline-row input { flex: 1; min-width: 0; }
+.pick-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; max-height: 300px; overflow-y: auto; }
+.pick-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 14px; cursor: pointer; font-weight: 600; }
+.pick-row:hover { background: var(--panel-2); }
+.pick-row:has(input:checked) { background: var(--accent-soft); }
+.pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-row input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); cursor: pointer; }
+.member-list { padding: 0; }
+.member .info { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member .tag { color: var(--muted); font-size: 13px; flex: none; }
+.btn.danger { background: color-mix(in srgb, var(--danger) 12%, var(--panel)); color: var(--danger); }
+.btn.danger:hover { filter: brightness(1.05); }
+
+/* ---------- Photos ---------- */
+.bubble img.photo { width: 320px; height: auto; max-width: 100%; max-height: 360px; object-fit: cover; }
+/* Petite miniature quand on répond à une photo */
+.quote { flex-direction: row; align-items: center; gap: 8px; }
+.q-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.quote .q-thumb { width: 40px; height: 40px; max-height: none; object-fit: cover; border-radius: 7px; flex: none; cursor: pointer; }
+
+/* Voir une photo en grand */
+.viewer {
+  width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
+  background: transparent; display: none; place-items: center;
+}
+.viewer[open] { display: grid; animation: rise .15s ease-out; }
+.viewer::backdrop { background: rgba(5, 4, 10, .88); }
+.viewer img { max-width: calc(100vw - 24px); max-height: calc(100dvh - 90px); object-fit: contain; border-radius: 10px; cursor: zoom-out; }
+.viewer-bar { position: fixed; top: max(12px, env(safe-area-inset-top)); right: 12px; display: flex; gap: 6px; }
+.viewer-bar .icon-btn { background: rgba(255, 255, 255, .14); color: #fff; }
+.viewer-bar .icon-btn:hover { background: rgba(255, 255, 255, .26); color: #fff; }
+
+/* ---------- Installer l'appli ---------- */
+.install-note { margin: 0 2px 10px; }
+#installBtn svg { width: 17px; height: 17px; }
+/* Une fois installé (plein écran), on respecte l'encoche du téléphone */
+@media (display-mode: standalone) {
+  .side-head, .chat-head { padding-top: max(12px, env(safe-area-inset-top)); }
+}

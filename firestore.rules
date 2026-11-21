@@ -51,14 +51,34 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Une conversation = une amitié entre 2 personnes.
-    // id = les deux uid triés, séparés par "_"
+    // Une conversation = une amitié entre 2 personnes (id = les deux uid triés, séparés par "_")
+    // ou un groupe (id = "g_" + un id au hasard, group = true, 3 à 20 membres).
     match /chats/{chatId} {
       function isMember(data) { return me() in data.members; }
+      function isGroup(data) { return data.get('group', false) == true; }
       function other(data) { return data.members[0] == me() ? data.members[1] : data.members[0]; }
       function nameOf(uid) { return get(/databases/$(database)/documents/users/$(uid)).data.username; }
+      function validTitle(t) { return t is string && t.size() >= 1 && t.size() <= 40; }
+      // Une liste de membres sans doublon, 20 personnes maximum
+      function validMembers(m) { return m is list && m.size() <= 20 && m.toSet().size() == m.size(); }
 
       allow read: if signedIn() && isMember(resource.data);
+
+      // Créer un groupe (avec au moins 2 amis)
+      allow create: if signedIn()
+        && chatId.matches('^g_[A-Za-z0-9]{10,40}$')
+        && request.resource.data.keys().hasOnly(['group', 'title', 'members', 'createdBy', 'accepted', 'createdAt', 'lastAt', 'lastText', 'lastFrom'])
+        && request.resource.data.group == true
+        && validTitle(request.resource.data.title)
+        && validMembers(request.resource.data.members)
+        && request.resource.data.members.size() >= 3
+        && isMember(request.resource.data)
+        && request.resource.data.createdBy == me()
+        && request.resource.data.accepted == true
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.lastAt == request.time
+        && request.resource.data.lastText == ''
+        && request.resource.data.lastFrom == '';
 
       // Demande d'ami
       allow create: if signedIn()
@@ -100,10 +120,33 @@ service cloud.firestore {
             && request.resource.data.reads is map
             && request.resource.data.reads.diff(resource.data.get('reads', {})).affectedKeys().hasOnly([me()])
             && request.resource.data.reads[me()] == request.time)
+          ||
+          // Groupe : renommer
+          (isGroup(resource.data)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title'])
+            && validTitle(request.resource.data.title))
+          ||
+          // Groupe : ajouter des membres (on ne peut retirer personne d'autre)
+          (isGroup(resource.data)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+            && validMembers(request.resource.data.members)
+            && request.resource.data.members.toSet().hasAll(resource.data.members))
+          ||
+          // Groupe : quitter (on ne peut retirer que soi-même)
+          (isGroup(resource.data)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+            && request.resource.data.members is list
+            && request.resource.data.members.size() == resource.data.members.size() - 1
+            && !(me() in request.resource.data.members)
+            && resource.data.members.toSet().hasAll(request.resource.data.members))
         );
 
-      // Refuser une demande / retirer un ami
-      allow delete: if signedIn() && isMember(resource.data);
+      // Refuser une demande / retirer un ami.
+      // Un groupe : seulement celui qui l'a créé, ou le dernier membre qui reste.
+      allow delete: if signedIn() && isMember(resource.data)
+        && (!isGroup(resource.data)
+            || resource.data.createdBy == me()
+            || resource.data.members.size() == 1);
 
       match /messages/{msgId} {
         function chat() { return get(/databases/$(database)/documents/chats/$(chatId)).data; }
@@ -120,13 +163,26 @@ service cloud.firestore {
             && f.size is int && f.size >= 0;
         }
 
+        // Photo rangée directement dans le message (réduite par le site avant l'envoi),
+        // comme ça pas besoin de Firebase Storage.
+        function validImage(i) {
+          return i is map
+            && i.keys().hasAll(['data', 'w', 'h'])
+            && i.keys().hasOnly(['data', 'w', 'h', 'name'])
+            && i.data is string && i.data.size() <= 900000
+            && i.data.matches('^data:image/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$')
+            && i.w is int && i.w > 0 && i.w <= 5000
+            && i.h is int && i.h > 0 && i.h <= 5000
+            && (!('name' in i) || (i.name is string && i.name.size() <= 200));
+        }
+
         // Réponse à un message : un petit extrait du message d'origine (qui doit exister)
         function validReply(r) {
           return r is map
             && r.keys().hasAll(['id', 'from', 'text'])
             && r.keys().hasOnly(['id', 'from', 'text'])
             && r.id is string && r.id.size() > 0 && r.id.size() <= 100 && r.id != msgId
-            && r.from in chat().members
+            && r.from is string && r.from.size() <= 128
             && r.text is string && r.text.size() <= 200
             && exists(/databases/$(database)/documents/chats/$(chatId)/messages/$(r.id));
         }
@@ -135,15 +191,17 @@ service cloud.firestore {
         allow create: if signedIn()
           && me() in chat().members
           && chat().accepted == true
-          && request.resource.data.keys().hasOnly(['from', 'text', 'at', 'file', 'replyTo'])
+          && request.resource.data.keys().hasOnly(['from', 'text', 'at', 'file', 'image', 'replyTo'])
           && (!('replyTo' in request.resource.data) || validReply(request.resource.data.replyTo))
+          && (!('file' in request.resource.data) || validFile(request.resource.data.file))
+          && (!('image' in request.resource.data) || validImage(request.resource.data.image))
           && request.resource.data.from == me()
           && request.resource.data.text is string
           && request.resource.data.text.size() <= 1000
           && request.resource.data.at == request.time
           && ('file' in request.resource.data
-                ? validFile(request.resource.data.file)
-                : request.resource.data.text.size() > 0);
+                || 'image' in request.resource.data
+                || request.resource.data.text.size() > 0);
 
         // Réagir avec un emoji : chacun ne peut changer (ou retirer) que SA réaction
         allow update: if signedIn()

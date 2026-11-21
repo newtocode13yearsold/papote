@@ -1,0 +1,19 @@
+{
+  "name": "Papote — discute avec tes amis",
+  "short_name": "Papote",
+  "description": "Discute en direct avec tes amis, seul à seul ou en groupe.",
+  "lang": "fr",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f5fa",
+  "theme_color": "#6d4aff",
+  "categories": ["social"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

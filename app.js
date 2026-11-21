@@ -9,6 +9,7 @@ import {
 import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, collection, query, where,
   orderBy, limit, limitToLast, onSnapshot, writeBatch, serverTimestamp, updateDoc, deleteField,
+  arrayUnion, arrayRemove,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
 import {
   getStorage, ref as fileRef, uploadBytesResumable, getDownloadURL,
@@ -32,6 +33,7 @@ let me = null;          // { uid, username }
 let chats = [];         // mes conversations (amis + demandes)
 let openChatId = null;  // conversation ouverte
 let people = [];        // tous les membres inscrits (sauf moi)
+let peopleByUid = new Map(); // uid -> pseudo (pour les noms dans les groupes)
 let unsubChats = null;
 let unsubPeople = null;
 let unsubMessages = null;
@@ -265,8 +267,9 @@ function cleanup() {
   stopPresence();
   chatsLoaded = false;
   knownLastAt.clear();
-  me = null; chats = []; people = []; openChatId = null;
+  me = null; chats = []; people = []; peopleByUid = new Map(); openChatId = null;
   replyingTo = null;
+  document.querySelectorAll('dialog[open]').forEach((d) => d.close());
   $('replyBar').hidden = true;
   $('peopleList').replaceChildren();
   $('app').classList.remove('in-chat');
@@ -275,8 +278,23 @@ function cleanup() {
 }
 
 // ---------- Liste des amis et demandes ----------
+// Une conversation est soit entre 2 amis, soit un groupe (group = true)
+function isGroup(chat) { return !!chat?.group; }
 function otherUid(chat) { return chat.members.find((u) => u !== me.uid); }
 function otherName(chat) { return chat.names?.[otherUid(chat)] || '?'; }
+function chatTitle(chat) { return isGroup(chat) ? (chat.title || 'Groupe') : otherName(chat); }
+function paintChatAvatar(el, chat) {
+  paintAvatar(el, chatTitle(chat));
+  el.classList.toggle('group', isGroup(chat));
+}
+
+// Le pseudo de n'importe qui (moi, un ami, ou un membre d'un groupe)
+function userName(uid) {
+  if (me && uid === me.uid) return me.username;
+  if (peopleByUid.has(uid)) return peopleByUid.get(uid);
+  for (const c of chats) if (c.names?.[uid]) return c.names[uid];
+  return '?';
+}
 
 function listenChats() {
   const q = query(collection(db, 'chats'), where('members', 'array-contains', me.uid));
@@ -349,17 +367,21 @@ function renderLists() {
     const unread = c.lastFrom && c.lastFrom !== me.uid && at.getTime() > lastRead(c.id) && c.id !== openChatId;
     if (unread) li.classList.add('unread');
 
-    const av = document.createElement('span'); av.className = 'avatar'; paintAvatar(av, otherName(c));
-    if (isOnline(otherUid(c))) { av.classList.add('online'); av.title = 'En ligne'; }
+    const group = isGroup(c);
+    const av = document.createElement('span'); av.className = 'avatar'; paintChatAvatar(av, c);
+    if (!group && isOnline(otherUid(c))) { av.classList.add('online'); av.title = 'En ligne'; }
     const info = document.createElement('div'); info.className = 'info';
     const name = document.createElement('div'); name.className = 'name';
-    const nm = document.createElement('span'); nm.textContent = otherName(c);
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = chatTitle(c);
     const tm = document.createElement('span'); tm.className = 'time'; tm.textContent = c.lastText ? shortTime(at) : '';
     name.append(nm, tm);
     const prev = document.createElement('div'); prev.className = 'preview';
+    let who = '';
+    if (c.lastFrom === me.uid) who = 'Toi : ';
+    else if (group && c.lastFrom) who = `${userName(c.lastFrom)} : `;
     prev.textContent = c.lastText
-      ? (c.lastFrom === me.uid ? 'Toi : ' : '') + c.lastText
-      : 'Dis bonjour !';
+      ? who + c.lastText
+      : group ? `Groupe · ${c.members.length} membres` : 'Dis bonjour !';
     info.append(name, prev);
     li.append(av, info);
     if (unread) { const d = document.createElement('span'); d.className = 'dot'; li.append(d); }
@@ -368,7 +390,7 @@ function renderLists() {
     friendsList.append(li);
   }
   $('noFriends').hidden = friends.length > 0;
-  const onlineNow = friends.filter((c) => isOnline(otherUid(c))).length;
+  const onlineNow = friends.filter((c) => !isGroup(c) && isOnline(otherUid(c))).length;
   $('onlineCount').textContent = onlineNow ? `· ${onlineNow} en ligne` : '';
 
   const unreadCount = friends.filter((c) => c.lastFrom && c.lastFrom !== me.uid && toDate(c.lastAt).getTime() > lastRead(c.id) && c.id !== openChatId).length;
@@ -387,7 +409,10 @@ function listenPeople() {
     people = snap.docs
       .filter((d) => d.id !== me.uid)
       .map((d) => ({ uid: d.id, username: d.data().username }));
-    renderPeople();
+    peopleByUid = new Map(people.map((p) => [p.uid, p.username]));
+    renderLists(); // les noms dans les groupes peuvent avoir changé
+    const c = chats.find((x) => x.id === openChatId);
+    if (isGroup(c)) { if (currentMsgs.length) renderMessages(currentMsgs); paintChatStatus(); }
   }, (err) => {
     console.error(err);
     $('noPeople').hidden = false;
@@ -538,8 +563,8 @@ function openChat(chatId) {
   $('chatEmpty').hidden = true;
   $('chatInner').hidden = false;
   $('app').classList.add('in-chat');
-  $('chatName').textContent = otherName(c);
-  paintAvatar($('chatAvatar'), otherName(c));
+  $('chatName').textContent = chatTitle(c);
+  paintChatAvatar($('chatAvatar'), c);
   $('messages').replaceChildren();
   mediaCache.clear();
   renderedIds.clear();
@@ -584,6 +609,12 @@ function closeChat() {
 function renderChatState(c) {
   $('pendingNote').hidden = true;
   $('sendForm').hidden = !c.accepted;
+  // Le nom du groupe peut changer pendant qu'on discute
+  $('chatName').textContent = chatTitle(c);
+  paintChatAvatar($('chatAvatar'), c);
+  $('removeBtn').hidden = isGroup(c);
+  $('groupBtn').hidden = !isGroup(c);
+  $('chatHeadInfo').disabled = !isGroup(c);
   paintReplyBar();
   paintChatStatus();
 }
@@ -640,6 +671,18 @@ function keepBottom() { if (stickToBottom) $('messages').scrollTop = $('messages
 
 function mediaFor(m) {
   if (mediaCache.has(m.id)) return mediaCache.get(m.id);
+  if (m.image) {
+    // Photo rangée dans le message lui-même (pas besoin de Firebase Storage)
+    const img = document.createElement('img');
+    img.src = m.image.data;
+    img.alt = m.image.name || 'Photo';
+    img.className = 'photo';
+    img.style.aspectRatio = `${m.image.w} / ${m.image.h}`;
+    img.style.width = `${Math.min(320, m.image.w)}px`; // une petite image n'est pas agrandie
+    img.onload = keepBottom;
+    mediaCache.set(m.id, img);
+    return img;
+  }
   const f = m.file;
   const kind = fileKind(f.type || '');
   let el;
@@ -676,26 +719,39 @@ function renderMessages(msgs) {
     d.textContent = 'Aucun message pour l’instant. Lance la discussion !';
     box.append(d);
   }
+  const group = isGroup(chats.find((x) => x.id === openChatId));
   let lastDay = '';
+  let lastFrom = '';
   for (const m of msgs) {
     const at = toDate(m.at);
     const day = at.toDateString();
     if (day !== lastDay) {
       lastDay = day;
+      lastFrom = '';
       const d = document.createElement('div');
       d.className = 'day';
       d.textContent = dayLabel(at);
       box.append(d);
     }
     const mine = m.from === me.uid;
+    const media = m.file || m.image;
     const b = document.createElement('div');
-    b.className = 'bubble' + (mine ? ' me' : '') + (m.file ? ' media' : '');
+    b.className = 'bubble' + (mine ? ' me' : '') + (media ? ' media' : '');
     // Seuls les nouveaux messages font la petite animation (pas à chaque mise à jour)
     if (!renderedIds.has(m.id)) { b.classList.add('new'); renderedIds.add(m.id); }
     b.dataset.id = m.id;
     b.dataset.at = String(at.getTime());
+    // Dans un groupe : le pseudo au-dessus du premier message de chaque personne
+    if (group && !mine && m.from !== lastFrom) {
+      const who = document.createElement('div');
+      who.className = 'sender';
+      who.textContent = userName(m.from);
+      who.style.color = colorFor(who.textContent);
+      b.append(who);
+    }
+    lastFrom = m.from;
     if (m.replyTo) b.append(quoteFor(m.replyTo));
-    if (m.file) {
+    if (media) {
       b.append(mediaFor(m));
       if (m.text) { const c = document.createElement('div'); c.className = 'caption'; c.textContent = m.text; b.append(c); }
     } else {
@@ -754,7 +810,9 @@ function paintSeen() {
   const box = $('messages');
   box.querySelector('.seen-label')?.remove();
   if (!c) return;
-  const theirRead = readMs(c, otherUid(c));
+  // ✓✓ quand tout le monde (les autres membres) a vu le message
+  const others = c.members.filter((u) => u !== me.uid);
+  const theirRead = others.length ? Math.min(...others.map((u) => readMs(c, u))) : 0;
   box.querySelectorAll('.bubble.me').forEach((b) => {
     const state = b.dataset.pending ? 'pending' : theirRead >= Number(b.dataset.at) ? 'seen' : 'sent';
     const t = b.querySelector('.ticks');
@@ -763,7 +821,22 @@ function paintSeen() {
     t.innerHTML = ICONS[state];
     t.title = TICK_LABEL[state];
   });
-  const last = currentMsgs.at(-1);
+  const last = currentMsgs[currentMsgs.length - 1];
+  if (isGroup(c)) {
+    // Groupe : "Vu par Léa, Tom" (ou "Vu par tout le monde")
+    if (!last || last.from !== me.uid || last.pending) return;
+    const lastMs = toDate(last.at).getTime();
+    const seenBy = others.filter((u) => readMs(c, u) >= lastMs);
+    if (!seenBy.length) return;
+    const label = document.createElement('div');
+    label.className = 'seen-label';
+    label.textContent = seenBy.length === others.length && others.length > 1
+      ? 'Vu par tout le monde'
+      : `Vu par ${seenBy.map(userName).join(', ')}`;
+    box.append(label);
+    keepBottom();
+    return;
+  }
   if (last && last.from === me.uid && !last.pending && theirRead >= toDate(last.at).getTime()) {
     const d = new Date(theirRead);
     const label = document.createElement('div');
@@ -777,20 +850,54 @@ function paintSeen() {
 }
 
 // Dit à ton ami que tu as vu ses messages (seulement si la page est vraiment affichée)
+// On retient le dernier message de l'ami déjà signalé "vu" (par son id, pas par l'heure :
+// l'horloge de l'ordi peut être décalée par rapport à celle de Firebase).
 const seenWriting = new Set();
+const seenUpTo = new Map(); // chatId -> id du dernier message de l'ami signalé "vu"
 function markSeen(chatId) {
   if (!chatId || chatId !== openChatId || document.visibilityState !== 'visible') return;
   const c = chats.find((x) => x.id === chatId);
   if (!c?.accepted || seenWriting.has(chatId)) return;
-  const lastTheirs = currentMsgs.findLast((m) => m.from !== me.uid);
-  if (!lastTheirs || readMs(c, me.uid) >= toDate(lastTheirs.at).getTime()) return;
+  let lastTheirs = null;
+  for (let i = currentMsgs.length - 1; i >= 0; i--) {
+    if (currentMsgs[i].from !== me.uid) { lastTheirs = currentMsgs[i]; break; }
+  }
+  if (!lastTheirs || seenUpTo.get(chatId) === lastTheirs.id) return;
+  if (readMs(c, me.uid) >= toDate(lastTheirs.at).getTime()) { seenUpTo.set(chatId, lastTheirs.id); return; }
   seenWriting.add(chatId);
   updateDoc(doc(db, 'chats', chatId), { [`reads.${me.uid}`]: serverTimestamp() })
-    .catch((err) => console.error('vu', err))
-    .finally(() => seenWriting.delete(chatId));
+    .catch((err) => console.error('vu', err)) // pas de nouvel essai pour ce message (sinon ça tourne en boucle)
+    .finally(() => {
+      seenUpTo.set(chatId, lastTheirs.id);
+      seenWriting.delete(chatId);
+      markSeen(chatId); // un message est peut-être arrivé pendant l'envoi
+    });
 }
 document.addEventListener('visibilitychange', () => markSeen(openChatId));
 window.addEventListener('focus', () => markSeen(openChatId));
+
+// ---------- Nouvelle version du site ----------
+// Si la page reste ouverte longtemps, elle garderait l'ancienne version (sans les
+// nouveautés comme "Vu"). On vérifie de temps en temps et on recharge tout seul.
+let appVersion = null;
+async function fetchAppVersion() {
+  try {
+    const r = await fetch('app.js', { method: 'HEAD', cache: 'no-store' });
+    return r.ok ? (r.headers.get('etag') || r.headers.get('last-modified')) : null;
+  } catch { return null; }
+}
+async function checkForUpdate() {
+  const v = await fetchAppVersion();
+  if (!v) return;
+  if (!appVersion) { appVersion = v; return; }
+  if (v === appVersion) return;
+  const busy = $('sendForm').text.value.trim() || currentUpload;
+  if (busy) { toast('Nouvelle version de Papote : recharge la page quand tu as fini.'); appVersion = v; return; }
+  location.reload();
+}
+checkForUpdate();
+setInterval(checkForUpdate, 5 * 60 * 1000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
 
 // ---------- Réagir à un message avec un emoji ----------
 const QUICK_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
@@ -800,9 +907,7 @@ const MORE_EMOJIS = [
 ];
 
 function nameOfUid(uid) {
-  if (uid === me.uid) return 'Toi';
-  const c = chats.find((x) => x.id === openChatId);
-  return c?.names?.[uid] || '?';
+  return uid === me.uid ? 'Toi' : userName(uid);
 }
 
 // La petite bulle sous le message : ❤️😂 2
@@ -918,7 +1023,8 @@ function closeReactPicker() {
 let replyingTo = null;
 
 function snippetOf(m) {
-  const raw = m.file ? fileLabel(m.file) + (m.text ? ' · ' + m.text : '') : m.text || '';
+  const label = m.image ? '📷 Photo' : m.file ? fileLabel(m.file) : '';
+  const raw = label ? label + (m.text ? ' · ' + m.text : '') : m.text || '';
   const t = raw.replace(/\s+/g, ' ').trim();
   return t.length > 120 ? t.slice(0, 120) + '…' : t;
 }
@@ -929,11 +1035,23 @@ function quoteFor(r) {
   q.type = 'button';
   q.className = 'quote';
   q.dataset.target = r.id || '';
+  const txt = document.createElement('span');
+  txt.className = 'q-text';
   const who = document.createElement('strong');
   who.textContent = nameOfUid(r.from);
   const t = document.createElement('span');
   t.textContent = r.text || 'Message';
-  q.append(who, t);
+  txt.append(who, t);
+  q.append(txt);
+  // Réponse à une photo : on montre une petite miniature de la photo
+  const orig = currentMsgs.find((x) => x.id === r.id);
+  if (orig?.image) {
+    const th = document.createElement('img');
+    th.className = 'q-thumb';
+    th.src = orig.image.data;
+    th.alt = '';
+    q.append(th);
+  }
   q.title = 'Voir le message d’origine';
   q.setAttribute('aria-label', `Réponse à ${who.textContent} : ${t.textContent}. Voir le message d’origine`);
   return q;
@@ -983,6 +1101,8 @@ messagesBox.addEventListener('click', (e) => {
   if (suppressClick) { suppressClick = false; e.preventDefault(); e.stopPropagation(); return; }
   const quote = e.target.closest('.quote');
   if (quote) { e.preventDefault(); jumpToMessage(quote.dataset.target); return; }
+  const img = e.target.closest('.bubble img');
+  if (img) { e.preventDefault(); openViewer(img.src, img.alt); return; }
   const reply = e.target.closest('.reply-btn');
   if (reply) { startReply(reply.closest('.bubble').dataset.id); return; }
   const btn = e.target.closest('.react-btn, .reacts');
@@ -1066,7 +1186,8 @@ let uploadCanceled = false;
 function showUpload(text, pct) {
   $('uploadBar').hidden = false;
   $('uploadLabel').textContent = text;
-  $('uploadProgress').value = pct;
+  if (pct == null) $('uploadProgress').removeAttribute('value'); // barre qui "attend"
+  else $('uploadProgress').value = pct;
 }
 
 async function sendFiles(files) {
@@ -1080,11 +1201,102 @@ async function sendFiles(files) {
   uploadCanceled = false;
   for (let i = 0; i < list.length && !uploadCanceled; i++) {
     const prefix = list.length > 1 ? `(${i + 1}/${list.length}) ` : '';
-    await sendOneFile(chatId, list[i], prefix, i === 0 ? reply : null);
+    const r = i === 0 ? reply : null;
+    // Les photos vont directement dans le message ; le reste passe par Firebase Storage
+    if (fileKind(list[i].type || '') === 'image' && await sendPhoto(chatId, list[i], prefix, r)) continue;
+    await sendOneFile(chatId, list[i], prefix, r);
   }
   currentUpload = null;
   $('uploadBar').hidden = true;
 }
+
+// ---------- Photos sans Firebase Storage ----------
+// La photo est réduite (1600 px max, JPEG) pour tenir dans un message Firestore (< 1 Mo).
+const PHOTO_MAX_SIDE = 1600;
+const PHOTO_MAX_CHARS = 850000; // taille max du texte "data:image/..." (la règle accepte 900 000)
+
+function readAsDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+// Renvoie { data, w, h } ou lance une erreur si le navigateur ne sait pas lire l'image (ex. HEIC)
+async function shrinkPhoto(file) {
+  const bmp = await createImageBitmap(file); // tourne la photo dans le bon sens tout seul
+  try {
+    // Petit GIF : on le garde tel quel, sinon il ne bougerait plus
+    if (file.type === 'image/gif' && file.size * 1.37 < PHOTO_MAX_CHARS) {
+      return { data: await readAsDataURL(file), w: bmp.width, h: bmp.height };
+    }
+    let side = PHOTO_MAX_SIDE;
+    let quality = 0.85;
+    for (let tries = 0; tries < 8; tries++) {
+      const scale = Math.min(1, side / Math.max(bmp.width, bmp.height));
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; // les parties transparentes deviennent blanches (le JPEG n'a pas de transparence)
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(bmp, 0, 0, w, h);
+      const data = canvas.toDataURL('image/jpeg', quality);
+      if (data.length <= PHOTO_MAX_CHARS) return { data, w, h };
+      if (quality > 0.6) quality -= 0.1;
+      else side = Math.round(side * 0.75);
+    }
+    throw new Error('photo trop lourde');
+  } finally {
+    bmp.close?.();
+  }
+}
+
+// Renvoie true si c'est fait (ou si l'erreur a déjà été affichée), false pour essayer en fichier
+async function sendPhoto(chatId, file, prefix, reply) {
+  const name = (file.name || 'photo').slice(0, 200);
+  showUpload(`${prefix}Préparation de la photo…`, null);
+  let photo;
+  try {
+    photo = await shrinkPhoto(file);
+  } catch (err) {
+    console.warn('photo', err);
+    return false; // format inconnu du navigateur : on l'envoie comme un fichier
+  }
+  if (uploadCanceled) return true;
+  showUpload(`${prefix}Envoi de la photo…`, null);
+  try {
+    const batch = writeBatch(db);
+    const data = { from: me.uid, text: '', at: serverTimestamp(), image: { ...photo, name } };
+    if (reply) data.replyTo = reply;
+    batch.set(doc(collection(db, 'chats', chatId, 'messages')), data);
+    batch.update(doc(db, 'chats', chatId), { lastAt: serverTimestamp(), lastText: '📷 Photo', lastFrom: me.uid });
+    await batch.commit();
+  } catch (err) {
+    console.error(err);
+    toast(`La photo « ${name} » n’a pas pu être envoyée. Réessaie.`);
+  }
+  return true;
+}
+
+// ---------- Voir une photo en grand ----------
+const viewer = $('viewer');
+function openViewer(src, name) {
+  $('viewerImg').src = src;
+  $('viewerImg').alt = name || 'Photo';
+  const save = $('viewerSave');
+  save.href = src;
+  // Une photo rangée dans le message s'enregistre en .jpg (ou .gif…)
+  const ext = src.startsWith('data:image/') ? src.slice(11, src.indexOf(';')).replace('jpeg', 'jpg') : '';
+  save.download = ext ? (name || 'photo').replace(/\.[a-z0-9]+$/i, '') + '.' + ext : (name || '');
+  viewer.showModal();
+}
+$('viewerClose').addEventListener('click', () => viewer.close());
+viewer.addEventListener('click', (e) => { if (e.target === viewer || e.target.id === 'viewerImg') viewer.close(); });
+viewer.addEventListener('close', () => { $('viewerImg').removeAttribute('src'); });
 
 async function sendOneFile(chatId, file, prefix, reply) {
   const msgRef = doc(collection(db, 'chats', chatId, 'messages'));
@@ -1117,8 +1329,9 @@ async function sendOneFile(chatId, file, prefix, reply) {
   } catch (err) {
     if (err.code === 'storage/canceled') { uploadCanceled = true; toast('Envoi annulé.'); return; }
     console.error(err);
-    toast(err.code === 'storage/unauthorized' || err.code === 'storage/unknown'
-      ? `Impossible d’envoyer « ${name} » pour le moment.`
+    // Firebase Storage pas activé sur le projet : seules les photos passent
+    toast(/^storage\/(unauthorized|unknown|bucket-not-found|project-not-found)$/.test(err.code || '')
+      ? `Pour l’instant on peut envoyer des photos, mais pas « ${name} » (vidéos et fichiers pas encore possibles).`
       : `« ${name} » n’a pas pu être envoyé. Réessaie.`);
   }
 }
@@ -1202,6 +1415,212 @@ $('sendForm').addEventListener('submit', async (e) => {
   }
 });
 
+// ---------- Groupes : discuter à plusieurs ----------
+const groupDialog = $('groupDialog');
+const GROUP_MAX = 20;
+const ICON_USERS = '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg>';
+
+function friendChats() { return chats.filter((c) => c.accepted && !isGroup(c)); }
+
+function mk(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+// Liste d'amis à cocher (sans ceux qui sont déjà dans le groupe)
+function friendPicker(exclude = new Set()) {
+  const list = mk('div', 'pick-list');
+  const friends = friendChats()
+    .map((c) => ({ uid: otherUid(c), name: otherName(c) }))
+    .filter((f) => !exclude.has(f.uid))
+    .sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+  for (const f of friends) {
+    const row = mk('label', 'pick-row');
+    const av = mk('span', 'avatar'); paintAvatar(av, f.name);
+    if (isOnline(f.uid)) av.classList.add('online');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = f.uid;
+    row.append(av, mk('span', 'pick-name', f.name), box);
+    list.append(row);
+  }
+  return { el: list, count: friends.length, selected: () => [...list.querySelectorAll('input:checked')].map((i) => i.value) };
+}
+
+function openGroupDialog(title, bodyParts, footParts) {
+  $('groupTitle').textContent = title;
+  $('groupBody').replaceChildren(...bodyParts);
+  $('groupFoot').replaceChildren(...footParts);
+  if (!groupDialog.open) groupDialog.showModal();
+}
+
+// Créer un nouveau groupe
+function openNewGroup() {
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.maxLength = 40;
+  nameInput.placeholder = 'ex. Les copains du collège';
+  nameInput.setAttribute('aria-label', 'Nom du groupe');
+  const picker = friendPicker();
+  const msg = mk('p', 'msg');
+  const body = [mk('h3', '', 'Nom du groupe'), nameInput, mk('h3', '', 'Qui ajouter ?')];
+  if (picker.count >= 2) body.push(mk('p', 'settings-note', 'Choisis au moins 2 amis.'), picker.el);
+  else body.push(mk('p', 'settings-note', 'Il te faut au moins 2 amis pour créer un groupe. Ajoute-les d’abord dans « Tout le monde ».'));
+  body.push(msg);
+
+  const cancel = mk('button', 'btn ghost small', 'Annuler'); cancel.type = 'button';
+  cancel.onclick = () => groupDialog.close();
+  const create = mk('button', 'btn primary small', 'Créer le groupe'); create.type = 'button';
+  create.disabled = picker.count < 2;
+  create.onclick = async () => {
+    const title = nameInput.value.trim().replace(/\s+/g, ' ');
+    const uids = picker.selected();
+    if (!title) { setMsg(msg, 'Donne un nom au groupe.'); nameInput.focus(); return; }
+    if (uids.length < 2) { setMsg(msg, 'Choisis au moins 2 amis.'); return; }
+    if (uids.length + 1 > GROUP_MAX) { setMsg(msg, `${GROUP_MAX} personnes maximum dans un groupe.`); return; }
+    create.disabled = true;
+    setMsg(msg, '');
+    try {
+      const id = 'g_' + doc(collection(db, 'chats')).id;
+      await setDoc(doc(db, 'chats', id), {
+        group: true,
+        title,
+        members: [me.uid, ...uids],
+        createdBy: me.uid,
+        accepted: true,
+        createdAt: serverTimestamp(),
+        lastAt: serverTimestamp(),
+        lastText: '',
+        lastFrom: '',
+      });
+      groupDialog.close();
+      openChat(id);
+      toast(`Groupe « ${title} » créé !`);
+    } catch (err) {
+      console.error(err);
+      create.disabled = false;
+      setMsg(msg, 'Impossible de créer le groupe. Réessaie.');
+    }
+  };
+  openGroupDialog('Nouveau groupe', body, [cancel, create]);
+  nameInput.focus();
+}
+
+// Infos d'un groupe : renommer, voir les membres, ajouter des amis, quitter
+function openGroupInfo(chatId) {
+  const c = chats.find((x) => x.id === chatId);
+  if (!isGroup(c)) return;
+  const msg = mk('p', 'msg');
+
+  // Renommer
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.maxLength = 40;
+  nameInput.value = c.title || '';
+  nameInput.setAttribute('aria-label', 'Nom du groupe');
+  const rename = mk('button', 'btn ghost small', 'Renommer'); rename.type = 'button';
+  rename.onclick = async () => {
+    const title = nameInput.value.trim().replace(/\s+/g, ' ');
+    if (!title) { setMsg(msg, 'Le nom ne peut pas être vide.'); return; }
+    if (title === c.title) return;
+    try {
+      await updateDoc(doc(db, 'chats', c.id), { title });
+      toast('Groupe renommé.');
+    } catch (err) { console.error(err); setMsg(msg, 'Impossible de renommer le groupe.'); }
+  };
+  nameInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); rename.click(); } };
+  const nameRow = mk('div', 'inline-row'); nameRow.append(nameInput, rename);
+
+  // Membres
+  const members = mk('ul', 'list member-list');
+  const sorted = [...c.members].sort((a, b) => (a === me.uid ? -1 : b === me.uid ? 1 : userName(a).localeCompare(userName(b), 'fr')));
+  for (const uid of sorted) {
+    const li = mk('li', 'member');
+    const av = mk('span', 'avatar'); paintAvatar(av, userName(uid));
+    if (uid !== me.uid && isOnline(uid)) av.classList.add('online');
+    const info = mk('div', 'info', uid === me.uid ? `${me.username} (toi)` : userName(uid));
+    li.append(av, info);
+    if (uid === c.createdBy) li.append(mk('span', 'tag', 'a créé le groupe'));
+    members.append(li);
+  }
+
+  // Ajouter des amis
+  const picker = friendPicker(new Set(c.members));
+  const add = mk('button', 'btn primary small', 'Ajouter au groupe'); add.type = 'button';
+  add.onclick = async () => {
+    const uids = picker.selected();
+    if (!uids.length) { setMsg(msg, 'Coche les amis à ajouter.'); return; }
+    if (c.members.length + uids.length > GROUP_MAX) { setMsg(msg, `${GROUP_MAX} personnes maximum dans un groupe.`); return; }
+    add.disabled = true;
+    try {
+      await updateDoc(doc(db, 'chats', c.id), { members: arrayUnion(...uids) });
+      toast(uids.length > 1 ? 'Amis ajoutés au groupe !' : 'Ami ajouté au groupe !');
+      openGroupInfo(c.id); // on remet la liste à jour
+    } catch (err) {
+      console.error(err);
+      add.disabled = false;
+      setMsg(msg, 'Impossible d’ajouter ces amis.');
+    }
+  };
+
+  const body = [
+    mk('h3', '', 'Nom du groupe'), nameRow,
+    mk('h3', '', `Membres (${c.members.length})`), members,
+    mk('h3', '', 'Ajouter des amis'),
+  ];
+  if (picker.count) body.push(picker.el, add);
+  else body.push(mk('p', 'settings-note', friendChats().length ? 'Tous tes amis sont déjà dans le groupe.' : 'Ajoute d’abord des amis.'));
+  body.push(msg);
+
+  const leave = mk('button', 'btn danger small', 'Quitter le groupe'); leave.type = 'button';
+  leave.onclick = () => leaveGroup(c);
+  const foot = [leave];
+  if (c.createdBy === me.uid) {
+    const del = mk('button', 'btn danger small', 'Supprimer le groupe'); del.type = 'button';
+    del.onclick = () => deleteGroup(c);
+    foot.push(del);
+  }
+  openGroupDialog(c.title || 'Groupe', body, foot);
+}
+
+async function leaveGroup(c) {
+  const last = c.members.length <= 1;
+  if (!confirm(last
+    ? `Quitter « ${chatTitle(c)} » ? Tu es le dernier membre : le groupe sera supprimé.`
+    : `Quitter « ${chatTitle(c)} » ? Tu ne verras plus les messages du groupe.`)) return;
+  groupDialog.close();
+  if (openChatId === c.id) closeChat();
+  try {
+    if (last) await deleteDoc(doc(db, 'chats', c.id));
+    else await updateDoc(doc(db, 'chats', c.id), { members: arrayRemove(me.uid) });
+    toast(`Tu as quitté « ${chatTitle(c)} ».`);
+  } catch (err) {
+    console.error(err);
+    toast('Impossible de quitter le groupe pour le moment.');
+  }
+}
+
+async function deleteGroup(c) {
+  if (!confirm(`Supprimer « ${chatTitle(c)} » ? Le groupe et ses messages disparaîtront pour tout le monde.`)) return;
+  groupDialog.close();
+  if (openChatId === c.id) closeChat();
+  try {
+    await deleteDoc(doc(db, 'chats', c.id));
+    toast('Groupe supprimé.');
+  } catch (err) {
+    console.error(err);
+    toast('Impossible de supprimer le groupe.');
+  }
+}
+
+$('newGroupBtn').addEventListener('click', openNewGroup);
+$('groupBtn').addEventListener('click', () => openGroupInfo(openChatId));
+$('chatHeadInfo').addEventListener('click', () => openGroupInfo(openChatId));
+$('groupClose').addEventListener('click', () => groupDialog.close());
+groupDialog.addEventListener('click', (e) => { if (e.target === groupDialog) groupDialog.close(); });
+
 $('backBtn').addEventListener('click', closeChat);
 $('removeBtn').addEventListener('click', () => {
   const c = chats.find((x) => x.id === openChatId);
@@ -1210,8 +1629,9 @@ $('removeBtn').addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!reactPicker.hidden) { closeReactPicker(); return; }
-  if (replyingTo && openChatId && !$('settings').open) { cancelReply(); return; }
-  if (openChatId && !$('settings').open) closeChat();
+  if (document.querySelector('dialog[open]')) return; // Échap ferme d'abord la fenêtre ouverte
+  if (replyingTo && openChatId) { cancelReply(); return; }
+  if (openChatId) closeChat();
 });
 
 // ---------- Qui est en ligne ? (Firebase Realtime Database : status/{uid}) ----------
@@ -1263,7 +1683,7 @@ function stopPresence() {
 
 // Écoute le statut de chaque ami (et arrête pour ceux qui ne le sont plus)
 function syncFriendStatus() {
-  const uids = new Set(chats.filter((c) => c.accepted).map(otherUid));
+  const uids = new Set(chats.filter((c) => c.accepted && !isGroup(c)).map(otherUid));
   for (const [uid, stop] of statusSubs) {
     if (!uids.has(uid)) { stop(); statusSubs.delete(uid); friendStatus.delete(uid); }
   }
@@ -1297,6 +1717,16 @@ function paintChatStatus() {
   const c = chats.find((x) => x.id === openChatId);
   const el = $('chatStatus');
   if (!c) { el.textContent = ''; return; }
+  if (isGroup(c)) {
+    // Groupe : la liste des membres (et combien d'amis sont en ligne)
+    const others = c.members.filter((u) => u !== me.uid).map(userName).sort((a, b) => a.localeCompare(b, 'fr'));
+    const online = c.members.filter((u) => u !== me.uid && isOnline(u)).length;
+    el.textContent = (others.length ? others.join(', ') + ' et toi' : 'Il ne reste que toi')
+      + (online ? ` · ${online} en ligne` : '');
+    el.classList.remove('online');
+    $('chatAvatar').classList.remove('online');
+    return;
+  }
   const uid = otherUid(c);
   el.textContent = c.accepted ? statusText(uid) : '';
   el.classList.toggle('online', isOnline(uid));
@@ -1400,7 +1830,11 @@ function checkForNews(snap) {
     knownLastAt.set(id, at);
     if (!chatsLoaded || ch.doc.metadata.hasPendingWrites || notifPref() === 'off') continue;
 
-    if (ch.type === 'added' && !c.accepted && c.requestedBy !== me.uid) {
+    if (ch.type === 'added' && isGroup(c)) {
+      if (c.createdBy === me.uid) continue;
+      playDing();
+      showNotif('Nouveau groupe', `Tu as été ajouté au groupe « ${chatTitle(c)} »`, id);
+    } else if (ch.type === 'added' && !c.accepted && c.requestedBy !== me.uid) {
       playDing();
       showNotif('Nouvelle demande d’ami', `${otherName(c)} veut être ton ami`, null);
     } else if (c.accepted && c.lastText && c.lastFrom && c.lastFrom !== me.uid && prev !== undefined && at > prev) {
@@ -1408,13 +1842,61 @@ function checkForNews(snap) {
       const watching = openChatId === id && document.visibilityState === 'visible' && document.hasFocus();
       if (watching) continue;
       playDing();
-      showNotif(otherName(c), c.lastText, id);
+      if (isGroup(c)) showNotif(chatTitle(c), `${userName(c.lastFrom)} : ${c.lastText}`, id);
+      else showNotif(otherName(c), c.lastText, id);
     }
   }
   chatsLoaded = true;
 }
 
 refreshNotifUI();
+
+// ---------- Installer Papote comme une application ----------
+// Chrome, Edge (ordi + Android) : le navigateur nous donne un "beforeinstallprompt" qu'on garde
+// pour afficher notre propre bouton "Installer". iPhone : il faut passer par Partager > Écran d'accueil.
+let installEvt = window.__papoteInstall || null; // attrapé tôt par theme-boot.js
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function isInstalled() {
+  return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+function installBannerDismissed() { try { return localStorage.getItem('papote_install_banner') === 'no'; } catch { return false; } }
+
+function refreshInstallUI() {
+  const installed = isInstalled();
+  const canPrompt = !!installEvt && !installed;
+  $('installBanner').hidden = installed || installBannerDismissed() || !(canPrompt || isIOS);
+  $('installBannerBtn').hidden = !canPrompt;
+  $('installBannerText').textContent = canPrompt
+    ? 'Installe Papote sur ton appareil, comme une vraie appli.'
+    : 'Installe Papote : touche Partager (carré avec une flèche) puis « Sur l’écran d’accueil ».';
+  $('installBtn').hidden = !canPrompt;
+  let note;
+  if (installed) note = 'Papote est installé sur cet appareil ✓';
+  else if (canPrompt) note = 'Une icône Papote sur ton écran, qui s’ouvre en plein écran sans barre d’adresse.';
+  else if (isIOS) note = 'Sur iPhone / iPad : ouvre Papote dans Safari, touche le bouton Partager (carré avec une flèche), puis « Sur l’écran d’accueil ».';
+  else note = 'Dans Chrome ou Edge : menu ⋮ puis « Installer Papote » (sur Android : « Ajouter à l’écran d’accueil »).';
+  $('installNote').textContent = note;
+}
+
+async function doInstall() {
+  if (!installEvt) return;
+  const evt = installEvt;
+  installEvt = null; // il ne sert qu'une fois
+  evt.prompt();
+  try { await evt.userChoice; } catch {}
+  refreshInstallUI();
+}
+
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; refreshInstallUI(); });
+window.addEventListener('appinstalled', () => { installEvt = null; toast('Papote est installé ! 🎉'); refreshInstallUI(); });
+$('installBtn').addEventListener('click', doInstall);
+$('installBannerBtn').addEventListener('click', doInstall);
+$('installDismiss').addEventListener('click', () => {
+  try { localStorage.setItem('papote_install_banner', 'no'); } catch {}
+  refreshInstallUI();
+});
+refreshInstallUI();
 
 // ---------- Personnaliser : mode nuit, couleur, fond, taille ----------
 const Theme = window.PapoteTheme;

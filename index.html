@@ -6,6 +6,13 @@
   <title>Papote — discute avec tes amis</title>
   <meta name="description" content="Papote : crée ton compte avec ton email et un pseudo, ajoute tes amis et discute avec eux en direct.">
   <meta name="theme-color" content="#6d4aff">
+  <!-- Pour installer Papote comme une application (téléphone et ordi) -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Papote">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%236d4aff'/><path d='M16 20h32a6 6 0 0 1 6 6v14a6 6 0 0 1-6 6H30l-9 7v-7h-5a6 6 0 0 1-6-6V26a6 6 0 0 1 6-6z' fill='white'/></svg>">
   <script src="theme-boot.js"></script>
   <link rel="stylesheet" href="style.css">
@@ -120,15 +127,29 @@
         </button>
       </div>
 
+      <div id="installBanner" class="notif-banner" hidden>
+        <svg viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M12 7v7M9 11l3 3 3-3M10.5 18.5h3"/></svg>
+        <span id="installBannerText"></span>
+        <button class="btn primary tiny" type="button" id="installBannerBtn">Installer</button>
+        <button class="icon-btn" type="button" id="installDismiss" aria-label="Plus tard" title="Plus tard">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
       <section id="requestsBox" hidden>
         <h3>Demandes d'amis</h3>
         <ul id="requestsList" class="list"></ul>
       </section>
 
       <section>
-        <h3>Mes amis <span id="onlineCount" class="online-count"></span></h3>
+        <div class="section-head">
+          <h3>Discussions <span id="onlineCount" class="online-count"></span></h3>
+          <button class="btn ghost tiny" type="button" id="newGroupBtn" title="Créer un groupe pour discuter à plusieurs">
+            <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>Groupe
+          </button>
+        </div>
         <ul id="friendsList" class="list"></ul>
-        <p id="noFriends" class="empty">Tu n'as pas encore d'amis ici. Ajoute-les avec leur pseudo juste au-dessus, ou dans « Tout le monde » plus bas.</p>
+        <p id="noFriends" class="empty">Tu n'as pas encore d'amis ici. Ajoute-les avec leur pseudo juste au-dessus, ou dans « Tout le monde » plus bas. Ensuite tu pourras créer un groupe pour discuter à plusieurs.</p>
       </section>
 
       <section>
@@ -149,11 +170,16 @@
           <button class="icon-btn back" id="backBtn" aria-label="Retour">
             <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <span class="avatar" id="chatAvatar"></span>
-          <div class="chat-title">
-            <strong id="chatName"></strong>
-            <small id="chatStatus"></small>
-          </div>
+          <button class="chat-head-info" id="chatHeadInfo" type="button" title="Infos du groupe">
+            <span class="avatar" id="chatAvatar"></span>
+            <span class="chat-title">
+              <strong id="chatName"></strong>
+              <small id="chatStatus"></small>
+            </span>
+          </button>
+          <button class="icon-btn" id="groupBtn" type="button" title="Membres du groupe" aria-label="Membres du groupe" hidden>
+            <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg>
+          </button>
           <button class="icon-btn danger" id="removeBtn" title="Retirer cet ami" aria-label="Retirer cet ami">
             <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
           </button>
@@ -177,7 +203,7 @@
           </button>
         </div>
         <form class="composer" id="sendForm">
-          <button type="button" class="icon-btn attach" id="attachBtn" title="Envoyer une photo, une vidéo ou un fichier" aria-label="Envoyer une photo, une vidéo ou un fichier">
+          <button type="button" class="icon-btn attach" id="attachBtn" title="Envoyer une photo" aria-label="Envoyer une photo ou un fichier">
             <svg viewBox="0 0 24 24"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
           </button>
           <input type="file" id="fileInput" multiple hidden>
@@ -223,6 +249,12 @@
       </div>
       <p class="settings-note" id="notifNote"></p>
 
+      <h3>Application</h3>
+      <p class="settings-note install-note" id="installNote"></p>
+      <button class="btn primary small" type="button" id="installBtn" hidden>
+        <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Installer Papote
+      </button>
+
       <h3>Couleur</h3>
       <div class="swatches" id="swatches"></div>
 
@@ -252,6 +284,31 @@
       <button class="btn ghost small" type="button" id="resetPrefs">Par défaut</button>
       <button class="btn primary small" type="button" data-close-settings>Terminé</button>
     </footer>
+  </dialog>
+
+  <!-- Fenêtre "Nouveau groupe" / infos du groupe (remplie par app.js) -->
+  <dialog id="groupDialog" class="settings" aria-labelledby="groupTitle">
+    <header class="settings-head">
+      <h2 id="groupTitle">Nouveau groupe</h2>
+      <button class="icon-btn" type="button" id="groupClose" aria-label="Fermer">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+    <div class="settings-body group-body" id="groupBody"></div>
+    <footer class="settings-foot" id="groupFoot"></footer>
+  </dialog>
+
+  <!-- Voir une photo en grand -->
+  <dialog id="viewer" class="viewer" aria-label="Photo">
+    <img id="viewerImg" alt="">
+    <div class="viewer-bar">
+      <a class="icon-btn" id="viewerSave" title="Enregistrer la photo" aria-label="Enregistrer la photo">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+      </a>
+      <button class="icon-btn" type="button" id="viewerClose" title="Fermer" aria-label="Fermer">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
   </dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>

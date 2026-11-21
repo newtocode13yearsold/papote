@@ -71,4 +71,11 @@
       return Object.assign({}, current);
     },
   };
+
+  // "Installer l'appli" : le navigateur peut le proposer avant que app.js soit chargé,
+  // alors on le garde ici pour app.js
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    window.__papoteInstall = e;
+  });
 })();
