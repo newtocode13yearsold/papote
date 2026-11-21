@@ -15,10 +15,15 @@ Un petit site pour discuter avec ses amis :
   conversations, et on ne peut écrire que dans une conversation acceptée par les deux amis.
   L'email n'est jamais visible par les autres, seulement le pseudo.
 
+- **Realtime Database** (`database.rules.json`) : qui est en ligne (`status/{uid}`).
+  Quand l'onglet se ferme, Firebase passe la personne « hors ligne » tout seul.
+- **sw.js** : petit service worker pour afficher les notifications de nouveaux messages
+  (elles marchent tant que Papote est ouvert dans un onglet).
+
 Projet Firebase : `chat-amis-tl26`. Pour redéployer les règles :
 
 ```bash
-npx firebase-tools deploy --only firestore --project chat-amis-tl26
+npx firebase-tools deploy --only firestore,database,storage --project chat-amis-tl26
 ```
 
 Tester en local :

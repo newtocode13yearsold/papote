@@ -13,6 +13,9 @@ import {
 import {
   getStorage, ref as fileRef, uploadBytesResumable, getDownloadURL,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-storage.js';
+import {
+  getDatabase, ref as dbRef, onValue, set as dbSet, onDisconnect, serverTimestamp as dbNow,
+} from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
 
 const app = initializeApp(firebaseConfig);
@@ -20,6 +23,7 @@ const auth = getAuth(app);
 auth.languageCode = 'fr';
 const db = getFirestore(app);
 const storage = getStorage(app); // Firebase Storage = les photos, vidéos et fichiers envoyés
+const rtdb = getDatabase(app);    // Realtime Database = qui est en ligne
 
 const $ = (id) => document.getElementById(id);
 const USERNAME_RE = /^[A-Za-z0-9_.]{3,20}$/;
@@ -212,7 +216,15 @@ $('pickForm').addEventListener('submit', async (e) => {
   }
 });
 
-document.querySelectorAll('[data-logout]').forEach((b) => b.addEventListener('click', () => signOut(auth)));
+document.querySelectorAll('[data-logout]').forEach((b) => b.addEventListener('click', async () => {
+  // On se met "hors ligne" avant de partir (après, on n'a plus le droit d'écrire)
+  if (me) {
+    const wait = (p) => Promise.race([p, new Promise((r) => setTimeout(r, 1500))]); // sans réseau, on n'attend pas
+    await wait(onDisconnect(myStatusRef()).cancel().catch(() => {}));
+    await wait(setMyStatus(false));
+  }
+  signOut(auth);
+}));
 
 // ---------- Session ----------
 let pendingSignup = false;
@@ -242,12 +254,17 @@ async function loadProfile(user) {
   show('app');
   listenChats();
   listenPeople();
+  startPresence();
+  refreshNotifUI();
 }
 
 function cleanup() {
   unsubChats?.(); unsubChats = null;
   unsubPeople?.(); unsubPeople = null;
   unsubMessages?.(); unsubMessages = null;
+  stopPresence();
+  chatsLoaded = false;
+  knownLastAt.clear();
   me = null; chats = []; people = []; openChatId = null;
   $('peopleList').replaceChildren();
   $('app').classList.remove('in-chat');
@@ -265,6 +282,8 @@ function listenChats() {
     chats = snap.docs
       .map((d) => ({ id: d.id, ...d.data({ serverTimestamps: 'estimate' }) }))
       .sort((a, b) => toDate(b.lastAt) - toDate(a.lastAt)); // plus récentes en haut
+    checkForNews(snap);
+    syncFriendStatus();
     renderLists();
     if (openChatId) {
       const c = chats.find((x) => x.id === openChatId);
@@ -329,6 +348,7 @@ function renderLists() {
     if (unread) li.classList.add('unread');
 
     const av = document.createElement('span'); av.className = 'avatar'; paintAvatar(av, otherName(c));
+    if (isOnline(otherUid(c))) { av.classList.add('online'); av.title = 'En ligne'; }
     const info = document.createElement('div'); info.className = 'info';
     const name = document.createElement('div'); name.className = 'name';
     const nm = document.createElement('span'); nm.textContent = otherName(c);
@@ -346,6 +366,8 @@ function renderLists() {
     friendsList.append(li);
   }
   $('noFriends').hidden = friends.length > 0;
+  const onlineNow = friends.filter((c) => isOnline(otherUid(c))).length;
+  $('onlineCount').textContent = onlineNow ? `· ${onlineNow} en ligne` : '';
 
   const unreadCount = friends.filter((c) => c.lastFrom && c.lastFrom !== me.uid && toDate(c.lastAt).getTime() > lastRead(c.id) && c.id !== openChatId).length;
   const total = unreadCount + incoming.length;
@@ -385,6 +407,7 @@ function renderPeople() {
     const li = document.createElement('li');
     li.className = 'person';
     const av = document.createElement('span'); av.className = 'avatar'; paintAvatar(av, p.username);
+    if (c?.accepted && isOnline(p.uid)) { av.classList.add('online'); av.title = 'En ligne'; }
     const info = document.createElement('div'); info.className = 'info'; info.textContent = p.username;
     li.append(av, info);
 
@@ -557,6 +580,7 @@ function closeChat() {
 function renderChatState(c) {
   $('pendingNote').hidden = true;
   $('sendForm').hidden = !c.accepted;
+  paintChatStatus();
 }
 
 // ---------- Photos, vidéos, fichiers ----------
@@ -1059,6 +1083,208 @@ document.addEventListener('keydown', (e) => {
   if (!reactPicker.hidden) { closeReactPicker(); return; }
   if (openChatId && !$('settings').open) closeChat();
 });
+
+// ---------- Qui est en ligne ? (Firebase Realtime Database : status/{uid}) ----------
+// Quand l'onglet se ferme ou que le réseau coupe, Firebase nous passe "hors ligne" tout seul.
+let unsubConnected = null;
+let unsubOffset = null;
+let awayTimer = null;
+let serverOffset = 0;              // écart entre l'horloge de l'ordi et celle de Firebase
+const friendStatus = new Map();    // uid -> { online, lastSeen }
+const statusSubs = new Map();      // uid -> arrêter d'écouter
+
+function myStatusRef() { return dbRef(rtdb, `status/${me.uid}`); }
+function setMyStatus(online) {
+  if (!me) return Promise.resolve();
+  return dbSet(myStatusRef(), { online, lastSeen: dbNow() }).catch((err) => console.error('présence', err));
+}
+
+function startPresence() {
+  unsubOffset = onValue(dbRef(rtdb, '.info/serverTimeOffset'), (s) => { serverOffset = s.val() || 0; });
+  unsubConnected = onValue(dbRef(rtdb, '.info/connected'), async (snap) => {
+    if (snap.val() !== true || !me) return;
+    try {
+      await onDisconnect(myStatusRef()).set({ online: false, lastSeen: dbNow() });
+      await setMyStatus(true);
+      if (document.visibilityState !== 'visible') goAwaySoon();
+    } catch (err) { console.error('présence', err); }
+  });
+}
+
+// Onglet caché pendant 2 minutes = plus "en ligne"
+function goAwaySoon() {
+  clearTimeout(awayTimer);
+  awayTimer = setTimeout(() => setMyStatus(false), 2 * 60 * 1000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!me) return;
+  if (document.visibilityState === 'visible') { clearTimeout(awayTimer); setMyStatus(true); }
+  else goAwaySoon();
+});
+
+function stopPresence() {
+  unsubConnected?.(); unsubConnected = null;
+  unsubOffset?.(); unsubOffset = null;
+  clearTimeout(awayTimer);
+  statusSubs.forEach((stop) => stop());
+  statusSubs.clear();
+  friendStatus.clear();
+}
+
+// Écoute le statut de chaque ami (et arrête pour ceux qui ne le sont plus)
+function syncFriendStatus() {
+  const uids = new Set(chats.filter((c) => c.accepted).map(otherUid));
+  for (const [uid, stop] of statusSubs) {
+    if (!uids.has(uid)) { stop(); statusSubs.delete(uid); friendStatus.delete(uid); }
+  }
+  for (const uid of uids) {
+    if (statusSubs.has(uid)) continue;
+    statusSubs.set(uid, onValue(dbRef(rtdb, `status/${uid}`), (s) => {
+      friendStatus.set(uid, s.val());
+      renderLists();
+      paintChatStatus();
+    }, (err) => console.error('statut', err)));
+  }
+}
+
+function isOnline(uid) { return !!friendStatus.get(uid)?.online; }
+
+function statusText(uid) {
+  const s = friendStatus.get(uid);
+  if (!s) return '';
+  if (s.online) return 'En ligne';
+  if (!s.lastSeen) return 'Hors ligne';
+  const min = Math.floor((Date.now() + serverOffset - s.lastSeen) / 60000);
+  if (min < 1) return 'Actif à l’instant';
+  if (min < 60) return `Actif il y a ${min} min`;
+  const d = new Date(s.lastSeen);
+  if (d.toDateString() === new Date().toDateString()) return `Actif aujourd’hui à ${hhmm(d)}`;
+  return `Actif ${dayLabel(d).toLowerCase()} à ${hhmm(d)}`;
+}
+
+// "En ligne" / "Actif il y a 5 min" sous le nom, en haut de la conversation
+function paintChatStatus() {
+  const c = chats.find((x) => x.id === openChatId);
+  const el = $('chatStatus');
+  if (!c) { el.textContent = ''; return; }
+  const uid = otherUid(c);
+  el.textContent = c.accepted ? statusText(uid) : '';
+  el.classList.toggle('online', isOnline(uid));
+  $('chatAvatar').classList.toggle('online', isOnline(uid));
+}
+setInterval(paintChatStatus, 30000);
+
+// ---------- Notifications quand un ami t'écrit ----------
+const canNotify = 'Notification' in window;
+let swReg = null;
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then((r) => { swReg = r; }).catch((err) => console.warn('sw', err));
+  // Clic sur une notification : le service worker nous dit quelle conversation ouvrir
+  navigator.serviceWorker.onmessage = (e) => { if (e.data?.openChat && me) openChat(e.data.openChat); };
+}
+
+function notifPref() { try { return localStorage.getItem('papote_notif') || 'on'; } catch { return 'on'; } }
+function setNotifPref(v) { try { localStorage.setItem('papote_notif', v); } catch {} refreshNotifUI(); }
+function bannerDismissed() { try { return localStorage.getItem('papote_notif_banner') === 'no'; } catch { return false; } }
+
+function refreshNotifUI() {
+  const perm = canNotify ? Notification.permission : 'unsupported';
+  const pref = notifPref();
+  $('notifBanner').hidden = !(perm === 'default' && pref === 'on' && !bannerDismissed());
+  document.querySelectorAll('#notifChoice [data-notif]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.notif === pref)));
+  let note = 'Tu es prévenu quand un ami t’écrit, tant que Papote est ouvert dans un onglet (même caché).';
+  if (pref === 'off') note = 'Plus de son ni de notification. Les nouveaux messages restent marqués d’un point.';
+  else if (perm === 'unsupported') note = 'Ton navigateur ne sait pas afficher de notifications : tu auras un son et un message en bas de l’écran.';
+  else if (perm === 'denied') note = 'Ton navigateur bloque les notifications de ce site : autorise-les avec le cadenas à côté de l’adresse.';
+  else if (perm === 'default') note = 'Ton navigateur va te demander l’autorisation.';
+  $('notifNote').textContent = note;
+}
+
+async function askNotifPermission() {
+  if (!canNotify) return;
+  try { await Notification.requestPermission(); } catch {}
+  refreshNotifUI();
+  if (Notification.permission === 'granted') toast('Notifications activées 🔔');
+  else if (Notification.permission === 'denied') toast('Notifications refusées. Tu peux changer ça dans les réglages du navigateur.');
+}
+$('notifEnable').addEventListener('click', askNotifPermission);
+$('notifDismiss').addEventListener('click', () => {
+  try { localStorage.setItem('papote_notif_banner', 'no'); } catch {}
+  refreshNotifUI();
+});
+document.querySelectorAll('#notifChoice [data-notif]').forEach((b) => b.addEventListener('click', () => {
+  setNotifPref(b.dataset.notif);
+  if (b.dataset.notif === 'on' && canNotify && Notification.permission === 'default') askNotifPermission();
+}));
+
+// Petit "ding" (le navigateur n'autorise le son qu'après un premier clic sur la page)
+let audioCtx = null;
+function audio() {
+  try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); } catch { return null; }
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+document.addEventListener('pointerdown', audio, { once: true });
+function playDing() {
+  const ctx = audio();
+  if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime;
+  for (const [freq, delay] of [[880, 0], [1320, 0.1]]) {
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t + delay);
+    g.gain.exponentialRampToValueAtTime(0.12, t + delay + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + delay + 0.25);
+    o.connect(g).connect(ctx.destination);
+    o.start(t + delay);
+    o.stop(t + delay + 0.3);
+  }
+}
+
+async function showNotif(title, body, chatId) {
+  const focused = document.visibilityState === 'visible' && document.hasFocus();
+  if (focused || !canNotify || Notification.permission !== 'granted') { toast(`${title} : ${body}`); return; }
+  const opts = { body, tag: chatId || 'papote', renotify: true, data: { chatId } };
+  try {
+    if (swReg) { await swReg.showNotification(title, opts); return; }
+    const n = new Notification(title, opts);
+    n.onclick = () => { window.focus(); if (chatId) openChat(chatId); n.close(); };
+  } catch (err) {
+    console.warn('notification', err);
+    toast(`${title} : ${body}`);
+  }
+}
+
+// Appelé par listenChats pour chaque conversation qui change
+let chatsLoaded = false;
+const knownLastAt = new Map();
+function checkForNews(snap) {
+  for (const ch of snap.docChanges()) {
+    const id = ch.doc.id;
+    if (ch.type === 'removed') { knownLastAt.delete(id); continue; }
+    const c = { id, ...ch.doc.data({ serverTimestamps: 'estimate' }) };
+    const at = toDate(c.lastAt).getTime();
+    const prev = knownLastAt.get(id);
+    knownLastAt.set(id, at);
+    if (!chatsLoaded || ch.doc.metadata.hasPendingWrites || notifPref() === 'off') continue;
+
+    if (ch.type === 'added' && !c.accepted && c.requestedBy !== me.uid) {
+      playDing();
+      showNotif('Nouvelle demande d’ami', `${otherName(c)} veut être ton ami`, null);
+    } else if (c.accepted && c.lastText && c.lastFrom && c.lastFrom !== me.uid && prev !== undefined && at > prev) {
+      // Pas besoin de prévenir si tu as déjà la conversation sous les yeux
+      const watching = openChatId === id && document.visibilityState === 'visible' && document.hasFocus();
+      if (watching) continue;
+      playDing();
+      showNotif(otherName(c), c.lastText, id);
+    }
+  }
+  chatsLoaded = true;
+}
+
+refreshNotifUI();
 
 // ---------- Personnaliser : mode nuit, couleur, fond, taille ----------
 const Theme = window.PapoteTheme;
