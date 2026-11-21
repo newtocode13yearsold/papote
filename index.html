@@ -166,6 +166,16 @@
           <button type="button" class="btn ghost tiny" id="uploadCancel">Annuler</button>
         </div>
         <div class="drop-hint" id="dropHint" hidden>Lâche pour envoyer</div>
+        <div class="reply-bar" id="replyBar" hidden>
+          <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+          <div class="reply-info">
+            <strong id="replyWho"></strong>
+            <span id="replyText"></span>
+          </div>
+          <button type="button" class="icon-btn" id="replyCancel" title="Annuler la réponse" aria-label="Annuler la réponse">
+            <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
         <form class="composer" id="sendForm">
           <button type="button" class="icon-btn attach" id="attachBtn" title="Envoyer une photo, une vidéo ou un fichier" aria-label="Envoyer une photo, une vidéo ou un fichier">
             <svg viewBox="0 0 24 24"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>

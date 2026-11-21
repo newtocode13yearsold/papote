@@ -266,6 +266,8 @@ function cleanup() {
   chatsLoaded = false;
   knownLastAt.clear();
   me = null; chats = []; people = []; openChatId = null;
+  replyingTo = null;
+  $('replyBar').hidden = true;
   $('peopleList').replaceChildren();
   $('app').classList.remove('in-chat');
   $('chatInner').hidden = true;
@@ -543,6 +545,7 @@ function openChat(chatId) {
   renderedIds.clear();
   currentMsgs = [];
   closeReactPicker();
+  replyingTo = null;
   stickToBottom = true;
   renderChatState(c);
   renderLists();
@@ -569,6 +572,7 @@ function closeChat() {
   unsubMessages?.(); unsubMessages = null;
   closeReactPicker();
   currentMsgs = [];
+  cancelReply();
   if (openChatId) markRead(openChatId, Date.now());
   openChatId = null;
   $('app').classList.remove('in-chat');
@@ -580,6 +584,7 @@ function closeChat() {
 function renderChatState(c) {
   $('pendingNote').hidden = true;
   $('sendForm').hidden = !c.accepted;
+  paintReplyBar();
   paintChatStatus();
 }
 
@@ -689,6 +694,7 @@ function renderMessages(msgs) {
     if (!renderedIds.has(m.id)) { b.classList.add('new'); renderedIds.add(m.id); }
     b.dataset.id = m.id;
     b.dataset.at = String(at.getTime());
+    if (m.replyTo) b.append(quoteFor(m.replyTo));
     if (m.file) {
       b.append(mediaFor(m));
       if (m.text) { const c = document.createElement('div'); c.className = 'caption'; c.textContent = m.text; b.append(c); }
@@ -706,14 +712,23 @@ function renderMessages(msgs) {
     }
     b.append(t);
 
-    // Bouton pour réagir (visible au survol, sur ordinateur)
+    // Boutons pour réagir et répondre (visibles au survol, sur ordinateur)
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
     const rb = document.createElement('button');
     rb.type = 'button';
     rb.className = 'react-btn';
     rb.title = 'Réagir';
     rb.setAttribute('aria-label', 'Réagir avec un emoji');
     rb.innerHTML = ICONS.smile;
-    b.append(rb);
+    const rp = document.createElement('button');
+    rp.type = 'button';
+    rp.className = 'reply-btn';
+    rp.title = 'Répondre';
+    rp.setAttribute('aria-label', 'Répondre à ce message');
+    rp.innerHTML = ICONS.reply;
+    actions.append(rb, rp);
+    b.append(actions);
 
     const pill = reactionsPill(m);
     if (pill) { b.classList.add('has-reacts'); b.append(pill); }
@@ -729,6 +744,7 @@ const ICONS = {
   sent: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   seen: '<svg viewBox="0 0 24 24"><path d="M1.5 12.5l4.5 4.5 9.5-9.5M11 17l9.5-9.5"/></svg>',
   smile: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>',
+  reply: '<svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
 };
 const TICK_LABEL = { pending: 'Envoi…', sent: 'Envoyé', seen: 'Vu' };
 
@@ -865,7 +881,12 @@ function openReactPicker(bubble) {
     placePicker(bubble);
   };
   row.append(plus);
-  reactPicker.replaceChildren(row, more);
+  const replyBtn = document.createElement('button');
+  replyBtn.type = 'button';
+  replyBtn.className = 'reply-action';
+  replyBtn.innerHTML = ICONS.reply + '<span>Répondre</span>';
+  replyBtn.onclick = () => { const id = pickerMsgId; closeReactPicker(); startReply(id); };
+  reactPicker.replaceChildren(row, more, replyBtn);
   reactPicker.hidden = false;
   placePicker(bubble);
   bubble.classList.add('picking');
@@ -892,14 +913,78 @@ function closeReactPicker() {
   document.querySelectorAll('.bubble.picking').forEach((b) => b.classList.remove('picking'));
 }
 
+// ---------- Répondre à un message ----------
+// Le message envoyé garde un petit extrait de celui d'origine : replyTo = { id, from, text }
+let replyingTo = null;
+
+function snippetOf(m) {
+  const raw = m.file ? fileLabel(m.file) + (m.text ? ' · ' + m.text : '') : m.text || '';
+  const t = raw.replace(/\s+/g, ' ').trim();
+  return t.length > 120 ? t.slice(0, 120) + '…' : t;
+}
+
+// Le bloc cité en haut de la bulle (le toucher remonte jusqu'au message d'origine)
+function quoteFor(r) {
+  const q = document.createElement('button');
+  q.type = 'button';
+  q.className = 'quote';
+  q.dataset.target = r.id || '';
+  const who = document.createElement('strong');
+  who.textContent = nameOfUid(r.from);
+  const t = document.createElement('span');
+  t.textContent = r.text || 'Message';
+  q.append(who, t);
+  q.title = 'Voir le message d’origine';
+  q.setAttribute('aria-label', `Réponse à ${who.textContent} : ${t.textContent}. Voir le message d’origine`);
+  return q;
+}
+
+function jumpToMessage(id) {
+  const el = id && $('messages').querySelector(`.bubble[data-id="${CSS.escape(id)}"]`);
+  if (!el) { toast('Ce message est trop ancien pour être affiché.'); return; }
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('flash');
+  void el.offsetWidth; // relance l'animation
+  el.classList.add('flash');
+}
+
+function startReply(msgId) {
+  const m = currentMsgs.find((x) => x.id === msgId);
+  const c = chats.find((x) => x.id === openChatId);
+  if (!m || !c?.accepted) return;
+  replyingTo = { id: m.id, from: m.from, text: snippetOf(m) };
+  paintReplyBar();
+  textarea.focus();
+  keepBottom();
+}
+
+function cancelReply() {
+  replyingTo = null;
+  paintReplyBar();
+}
+
+function paintReplyBar() {
+  const bar = $('replyBar');
+  bar.hidden = !replyingTo || $('sendForm').hidden;
+  if (bar.hidden) return;
+  $('replyWho').textContent = replyingTo.from === me.uid ? 'Réponse à ton message' : `Réponse à ${nameOfUid(replyingTo.from)}`;
+  $('replyText').textContent = replyingTo.text;
+}
+$('replyCancel').addEventListener('click', () => { cancelReply(); textarea.focus(); });
+
 const messagesBox = $('messages');
 let pressTimer = null;
 let pressStart = null;
 let suppressClick = false;
+let swipe = null; // glisser vers la droite pour répondre (téléphone)
 
 messagesBox.addEventListener('click', (e) => {
   // Après un appui long, on n'ouvre pas la photo / le lien qui était sous le doigt
   if (suppressClick) { suppressClick = false; e.preventDefault(); e.stopPropagation(); return; }
+  const quote = e.target.closest('.quote');
+  if (quote) { e.preventDefault(); jumpToMessage(quote.dataset.target); return; }
+  const reply = e.target.closest('.reply-btn');
+  if (reply) { startReply(reply.closest('.bubble').dataset.id); return; }
   const btn = e.target.closest('.react-btn, .reacts');
   if (!btn) return;
   const bubble = btn.closest('.bubble');
@@ -911,11 +996,13 @@ messagesBox.addEventListener('click', (e) => {
 messagesBox.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'mouse') return;
   const bubble = e.target.closest('.bubble');
-  if (!bubble || e.target.closest('video, audio, .reacts, .react-btn')) return;
+  if (!bubble || e.target.closest('video, audio, .reacts, .msg-actions')) return;
   pressStart = { x: e.clientX, y: e.clientY };
+  swipe = { bubble, x: e.clientX, y: e.clientY, dx: 0, active: false };
   clearTimeout(pressTimer);
   pressTimer = setTimeout(() => {
     pressTimer = null;
+    swipe = null;
     suppressClick = true;
     setTimeout(() => { suppressClick = false; }, 600);
     navigator.vibrate?.(12);
@@ -923,10 +1010,43 @@ messagesBox.addEventListener('pointerdown', (e) => {
   }, 450);
 });
 const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; };
-messagesBox.addEventListener('pointerup', cancelPress);
-messagesBox.addEventListener('pointercancel', cancelPress);
+const SWIPE_REPLY = 55; // px à glisser pour répondre
+
+function endSwipe(doReply) {
+  const s = swipe;
+  swipe = null;
+  if (!s?.active) return;
+  const b = s.bubble;
+  b.classList.add('swipe-back');
+  b.classList.remove('swiping', 'swipe-ready');
+  b.style.transform = '';
+  setTimeout(() => b.classList.remove('swipe-back'), 200);
+  suppressClick = true;
+  setTimeout(() => { suppressClick = false; }, 400);
+  if (doReply && s.dx >= SWIPE_REPLY) startReply(b.dataset.id);
+}
+
+messagesBox.addEventListener('pointerup', () => { cancelPress(); endSwipe(true); });
+messagesBox.addEventListener('pointercancel', () => { cancelPress(); endSwipe(false); });
 messagesBox.addEventListener('pointermove', (e) => {
   if (pressTimer && pressStart && Math.hypot(e.clientX - pressStart.x, e.clientY - pressStart.y) > 10) cancelPress();
+  if (!swipe) return;
+  const dx = e.clientX - swipe.x;
+  const dy = e.clientY - swipe.y;
+  if (!swipe.active) {
+    if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; } // on fait défiler
+    if (dx < 12 || dx < Math.abs(dy) * 1.5) return;
+    const c = chats.find((x) => x.id === openChatId);
+    if (!c?.accepted) { swipe = null; return; }
+    swipe.active = true;
+    swipe.bubble.classList.add('swiping');
+    closeReactPicker();
+  }
+  swipe.dx = Math.max(0, Math.min(dx, 80));
+  swipe.bubble.style.transform = `translateX(${swipe.dx}px)`;
+  const ready = swipe.dx >= SWIPE_REPLY;
+  if (ready && !swipe.bubble.classList.contains('swipe-ready')) navigator.vibrate?.(8);
+  swipe.bubble.classList.toggle('swipe-ready', ready);
 });
 // Sur téléphone, l'appui long ouvre les emojis au lieu du menu du navigateur
 messagesBox.addEventListener('contextmenu', (e) => {
@@ -934,7 +1054,7 @@ messagesBox.addEventListener('contextmenu', (e) => {
 });
 
 document.addEventListener('pointerdown', (e) => {
-  if (!reactPicker.hidden && !reactPicker.contains(e.target) && !e.target.closest('.react-btn, .reacts')) closeReactPicker();
+  if (!reactPicker.hidden && !reactPicker.contains(e.target) && !e.target.closest('.msg-actions, .reacts')) closeReactPicker();
 });
 messagesBox.addEventListener('scroll', closeReactPicker);
 window.addEventListener('resize', closeReactPicker);
@@ -955,16 +1075,18 @@ async function sendFiles(files) {
   const c = chats.find((x) => x.id === openChatId);
   if (!c?.accepted) return;
   const chatId = openChatId;
+  const reply = replyingTo; // la réponse va avec le premier fichier
+  cancelReply();
   uploadCanceled = false;
   for (let i = 0; i < list.length && !uploadCanceled; i++) {
     const prefix = list.length > 1 ? `(${i + 1}/${list.length}) ` : '';
-    await sendOneFile(chatId, list[i], prefix);
+    await sendOneFile(chatId, list[i], prefix, i === 0 ? reply : null);
   }
   currentUpload = null;
   $('uploadBar').hidden = true;
 }
 
-async function sendOneFile(chatId, file, prefix) {
+async function sendOneFile(chatId, file, prefix, reply) {
   const msgRef = doc(collection(db, 'chats', chatId, 'messages'));
   // Nom de fichier sans caractères gênants pour une adresse
   const safeName = (file.name || 'fichier').replace(/[\/\\#?\[\]*%]/g, '_').slice(-150);
@@ -983,7 +1105,9 @@ async function sendOneFile(chatId, file, prefix) {
     const url = await getDownloadURL(task.snapshot.ref);
     const fileInfo = { url, path, name, type, size: file.size };
     const batch = writeBatch(db);
-    batch.set(msgRef, { from: me.uid, text: '', at: serverTimestamp(), file: fileInfo });
+    const data = { from: me.uid, text: '', at: serverTimestamp(), file: fileInfo };
+    if (reply) data.replyTo = reply;
+    batch.set(msgRef, data);
     batch.update(doc(db, 'chats', chatId), {
       lastAt: serverTimestamp(),
       lastText: fileLabel(fileInfo),
@@ -1054,11 +1178,15 @@ $('sendForm').addEventListener('submit', async (e) => {
   if (!text || !openChatId) return;
   if (text.length > 1000) return toast('Message trop long (1000 caractères max).');
   const chatId = openChatId;
+  const reply = replyingTo;
   textarea.value = '';
   autoGrow();
+  cancelReply();
   try {
     const batch = writeBatch(db);
-    batch.set(doc(collection(db, 'chats', chatId, 'messages')), { from: me.uid, text, at: serverTimestamp() });
+    const data = { from: me.uid, text, at: serverTimestamp() };
+    if (reply) data.replyTo = reply;
+    batch.set(doc(collection(db, 'chats', chatId, 'messages')), data);
     batch.update(doc(db, 'chats', chatId), {
       lastAt: serverTimestamp(),
       lastText: text.length > 80 ? text.slice(0, 80) + '…' : text,
@@ -1069,6 +1197,7 @@ $('sendForm').addEventListener('submit', async (e) => {
     console.error(err);
     textarea.value = text;
     autoGrow();
+    if (reply && openChatId === chatId) { replyingTo = reply; paintReplyBar(); }
     toast('Message pas envoyé. Réessaie.');
   }
 });
@@ -1081,6 +1210,7 @@ $('removeBtn').addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!reactPicker.hidden) { closeReactPicker(); return; }
+  if (replyingTo && openChatId && !$('settings').open) { cancelReply(); return; }
   if (openChatId && !$('settings').open) closeChat();
 });
 

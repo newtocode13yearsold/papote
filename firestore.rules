@@ -120,11 +120,23 @@ service cloud.firestore {
             && f.size is int && f.size >= 0;
         }
 
+        // Réponse à un message : un petit extrait du message d'origine (qui doit exister)
+        function validReply(r) {
+          return r is map
+            && r.keys().hasAll(['id', 'from', 'text'])
+            && r.keys().hasOnly(['id', 'from', 'text'])
+            && r.id is string && r.id.size() > 0 && r.id.size() <= 100 && r.id != msgId
+            && r.from in chat().members
+            && r.text is string && r.text.size() <= 200
+            && exists(/databases/$(database)/documents/chats/$(chatId)/messages/$(r.id));
+        }
+
         allow read: if signedIn() && me() in chat().members;
         allow create: if signedIn()
           && me() in chat().members
           && chat().accepted == true
-          && request.resource.data.keys().hasOnly(['from', 'text', 'at', 'file'])
+          && request.resource.data.keys().hasOnly(['from', 'text', 'at', 'file', 'replyTo'])
+          && (!('replyTo' in request.resource.data) || validReply(request.resource.data.replyTo))
           && request.resource.data.from == me()
           && request.resource.data.text is string
           && request.resource.data.text.size() <= 1000
