@@ -1862,20 +1862,34 @@ function isInstalled() {
 }
 function installBannerDismissed() { try { return localStorage.getItem('papote_install_banner') === 'no'; } catch { return false; } }
 
+// Comment installer à la main, selon le navigateur (quand il ne propose pas encore le bouton)
+const UA = navigator.userAgent;
+const isAndroid = /android/i.test(UA);
+const isFirefox = /firefox|fxios/i.test(UA);
+const isSafariMac = !isIOS && /safari/i.test(UA) && !/chrome|chromium|crios|edg|android/i.test(UA);
+function installHowTo() {
+  if (isIOS) return 'dans Safari, touche Partager (carré avec une flèche) puis « Sur l’écran d’accueil ».';
+  if (isFirefox && !isAndroid) return 'ouvre ce site dans Chrome ou Edge : Firefox ne sait pas installer d’applis sur ordinateur.';
+  if (isAndroid) return 'menu ⋮ en haut à droite, puis « Installer l’application » (ou « Ajouter à l’écran d’accueil »).';
+  if (isSafariMac) return 'menu Fichier, puis « Ajouter au Dock ».';
+  return 'clique sur l’icône d’installation à droite de la barre d’adresse, ou menu ⋮ puis « Installer Papote ».';
+}
+
 function refreshInstallUI() {
   const installed = isInstalled();
   const canPrompt = !!installEvt && !installed;
-  $('installBanner').hidden = installed || installBannerDismissed() || !(canPrompt || isIOS);
+  // Le bandeau s'affiche toujours (sauf si déjà installé ou fermé) : avec le bouton
+  // quand le navigateur est prêt, sinon avec les explications pour ce navigateur
+  $('installBanner').hidden = installed || installBannerDismissed();
   $('installBannerBtn').hidden = !canPrompt;
   $('installBannerText').textContent = canPrompt
     ? 'Installe Papote sur ton appareil, comme une vraie appli.'
-    : 'Installe Papote : touche Partager (carré avec une flèche) puis « Sur l’écran d’accueil ».';
+    : 'Pour installer Papote : ' + installHowTo();
   $('installBtn').hidden = !canPrompt;
   let note;
   if (installed) note = 'Papote est installé sur cet appareil ✓';
   else if (canPrompt) note = 'Une icône Papote sur ton écran, qui s’ouvre en plein écran sans barre d’adresse.';
-  else if (isIOS) note = 'Sur iPhone / iPad : ouvre Papote dans Safari, touche le bouton Partager (carré avec une flèche), puis « Sur l’écran d’accueil ».';
-  else note = 'Dans Chrome ou Edge : menu ⋮ puis « Installer Papote » (sur Android : « Ajouter à l’écran d’accueil »).';
+  else note = 'Pour installer Papote : ' + installHowTo();
   $('installNote').textContent = note;
 }
 
