@@ -8,14 +8,18 @@ import {
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, collection, query, where,
-  orderBy, limit, limitToLast, onSnapshot, writeBatch, serverTimestamp, updateDoc,
+  orderBy, limit, limitToLast, onSnapshot, writeBatch, serverTimestamp, updateDoc, deleteField,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
+import {
+  getStorage, ref as fileRef, uploadBytesResumable, getDownloadURL,
+} from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-storage.js';
 import { firebaseConfig } from './firebase-config.js';
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 auth.languageCode = 'fr';
 const db = getFirestore(app);
+const storage = getStorage(app); // Firebase Storage = les photos, vidéos et fichiers envoyés
 
 const $ = (id) => document.getElementById(id);
 const USERNAME_RE = /^[A-Za-z0-9_.]{3,20}$/;
@@ -91,9 +95,16 @@ function friendlyError(err) {
   return map[code] || 'Oups, une erreur est survenue. Réessaie.';
 }
 
-// "Lu jusqu'à" : gardé dans ce navigateur pour savoir quels messages sont nouveaux
+// "Lu jusqu'à" : gardé dans ce navigateur, et aussi dans la conversation
+// (chats/{id}.reads.{uid}) pour que ton ami voie que tu as lu ses messages
+function readMs(chat, uid) {
+  const t = chat?.reads?.[uid];
+  return t?.toDate ? t.toDate().getTime() : 0;
+}
 function lastRead(chatId) {
-  try { return Number(localStorage.getItem(`papote_read_${me.uid}_${chatId}`)) || 0; } catch { return 0; }
+  let local = 0;
+  try { local = Number(localStorage.getItem(`papote_read_${me.uid}_${chatId}`)) || 0; } catch {}
+  return Math.max(local, readMs(chats.find((c) => c.id === chatId), me.uid));
 }
 function markRead(chatId, ms) {
   try { localStorage.setItem(`papote_read_${me.uid}_${chatId}`, String(ms || Date.now())); } catch {}
@@ -258,7 +269,7 @@ function listenChats() {
     if (openChatId) {
       const c = chats.find((x) => x.id === openChatId);
       if (!c) { closeChat(); toast('Cette conversation a été supprimée.'); }
-      else renderChatState(c);
+      else { renderChatState(c); paintSeen(); markSeen(openChatId); }
     }
   }, (err) => {
     console.error(err);
@@ -505,14 +516,24 @@ function openChat(chatId) {
   $('chatName').textContent = otherName(c);
   paintAvatar($('chatAvatar'), otherName(c));
   $('messages').replaceChildren();
+  mediaCache.clear();
+  renderedIds.clear();
+  currentMsgs = [];
+  closeReactPicker();
+  stickToBottom = true;
   renderChatState(c);
   renderLists();
 
   const q = query(collection(db, 'chats', chatId, 'messages'), orderBy('at'), limitToLast(200));
   unsubMessages = onSnapshot(q, (snap) => {
     if (openChatId !== chatId) return;
-    renderMessages(snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: 'estimate' }) })));
+    renderMessages(snap.docs.map((d) => ({
+      id: d.id,
+      pending: d.metadata.hasPendingWrites,
+      ...d.data({ serverTimestamps: 'estimate' }),
+    })));
     markRead(chatId, Date.now());
+    markSeen(chatId);
   }, (err) => {
     console.error(err);
     toast('Impossible de charger les messages.');
@@ -523,6 +544,8 @@ function openChat(chatId) {
 
 function closeChat() {
   unsubMessages?.(); unsubMessages = null;
+  closeReactPicker();
+  currentMsgs = [];
   if (openChatId) markRead(openChatId, Date.now());
   openChatId = null;
   $('app').classList.remove('in-chat');
@@ -536,7 +559,85 @@ function renderChatState(c) {
   $('sendForm').hidden = !c.accepted;
 }
 
+// ---------- Photos, vidéos, fichiers ----------
+function fileKind(type) {
+  if (type.startsWith('image/')) return 'image';
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'audio';
+  return 'file';
+}
+function fileLabel(f) {
+  const k = fileKind(f.type || '');
+  if (k === 'image') return '📷 Photo';
+  if (k === 'video') return '🎬 Vidéo';
+  if (k === 'audio') return '🎵 Audio';
+  const t = '📎 ' + f.name;
+  return t.length > 80 ? t.slice(0, 80) + '…' : t;
+}
+function prettySize(n) {
+  if (n < 1024) return `${n} o`;
+  if (n < 1024 ** 2) return `${Math.round(n / 1024)} Ko`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1).replace('.', ',')} Mo`;
+  return `${(n / 1024 ** 3).toFixed(1).replace('.', ',')} Go`;
+}
+
+function fileCard(f) {
+  const a = document.createElement('a');
+  a.className = 'file-card';
+  a.href = f.url;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.download = f.name;
+  a.innerHTML = '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 12v6M9 15l3 3 3-3"/></svg>';
+  const info = document.createElement('span');
+  const n = document.createElement('strong'); n.textContent = f.name;
+  const s = document.createElement('small'); s.textContent = prettySize(f.size || 0);
+  info.append(n, s);
+  a.append(info);
+  return a;
+}
+
+// Les photos/vidéos déjà affichées sont gardées : une vidéo en lecture
+// ne s'arrête pas quand un nouveau message arrive.
+const mediaCache = new Map();
+let stickToBottom = true;
+const renderedIds = new Set(); // messages déjà affichés (pour n'animer que les nouveaux)
+let currentMsgs = [];          // messages de la conversation ouverte
+$('messages').addEventListener('scroll', () => {
+  const box = $('messages');
+  stickToBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+});
+function keepBottom() { if (stickToBottom) $('messages').scrollTop = $('messages').scrollHeight; }
+
+function mediaFor(m) {
+  if (mediaCache.has(m.id)) return mediaCache.get(m.id);
+  const f = m.file;
+  const kind = fileKind(f.type || '');
+  let el;
+  if (kind === 'image') {
+    el = document.createElement('a');
+    el.href = f.url; el.target = '_blank'; el.rel = 'noopener';
+    const img = document.createElement('img');
+    img.src = f.url; img.alt = f.name; img.loading = 'lazy';
+    img.onload = keepBottom;
+    // Format que le navigateur ne sait pas afficher (ex. HEIC) : on montre le fichier
+    img.onerror = () => { const card = fileCard(f); mediaCache.set(m.id, card); el.replaceWith(card); };
+    el.append(img);
+  } else if (kind === 'video' || kind === 'audio') {
+    el = document.createElement(kind);
+    el.src = f.url; el.controls = true; el.preload = 'metadata';
+    el.playsInline = true;
+    el.onloadedmetadata = keepBottom;
+    el.onerror = () => { const card = fileCard(f); mediaCache.set(m.id, card); el.replaceWith(card); };
+  } else {
+    el = fileCard(f);
+  }
+  mediaCache.set(m.id, el);
+  return el;
+}
+
 function renderMessages(msgs) {
+  currentMsgs = msgs;
   const box = $('messages');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   box.replaceChildren();
@@ -557,16 +658,356 @@ function renderMessages(msgs) {
       d.textContent = dayLabel(at);
       box.append(d);
     }
+    const mine = m.from === me.uid;
     const b = document.createElement('div');
-    b.className = 'bubble' + (m.from === me.uid ? ' me' : '');
-    b.textContent = m.text;
+    b.className = 'bubble' + (mine ? ' me' : '') + (m.file ? ' media' : '');
+    // Seuls les nouveaux messages font la petite animation (pas à chaque mise à jour)
+    if (!renderedIds.has(m.id)) { b.classList.add('new'); renderedIds.add(m.id); }
+    b.dataset.id = m.id;
+    b.dataset.at = String(at.getTime());
+    if (m.file) {
+      b.append(mediaFor(m));
+      if (m.text) { const c = document.createElement('div'); c.className = 'caption'; c.textContent = m.text; b.append(c); }
+    } else {
+      b.append(document.createTextNode(m.text));
+    }
     const t = document.createElement('time');
     t.textContent = hhmm(at);
+    if (mine) {
+      // ✓ envoyé, ✓✓ vu (mis à jour par paintSeen)
+      b.dataset.pending = m.pending ? '1' : '';
+      const ticks = document.createElement('span');
+      ticks.className = 'ticks';
+      t.append(ticks);
+    }
     b.append(t);
+
+    // Bouton pour réagir (visible au survol, sur ordinateur)
+    const rb = document.createElement('button');
+    rb.type = 'button';
+    rb.className = 'react-btn';
+    rb.title = 'Réagir';
+    rb.setAttribute('aria-label', 'Réagir avec un emoji');
+    rb.innerHTML = ICONS.smile;
+    b.append(rb);
+
+    const pill = reactionsPill(m);
+    if (pill) { b.classList.add('has-reacts'); b.append(pill); }
     box.append(b);
   }
-  if (nearBottom || msgs.at(-1)?.from === me.uid) box.scrollTop = box.scrollHeight;
+  paintSeen();
+  if (nearBottom || msgs.at(-1)?.from === me.uid) { box.scrollTop = box.scrollHeight; stickToBottom = true; }
 }
+
+// ---------- Vu / pas encore vu ----------
+const ICONS = {
+  pending: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>',
+  sent: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  seen: '<svg viewBox="0 0 24 24"><path d="M1.5 12.5l4.5 4.5 9.5-9.5M11 17l9.5-9.5"/></svg>',
+  smile: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>',
+};
+const TICK_LABEL = { pending: 'Envoi…', sent: 'Envoyé', seen: 'Vu' };
+
+// Met les ✓ / ✓✓ à jour, et "Vu à 14:32" sous ton dernier message
+function paintSeen() {
+  const c = chats.find((x) => x.id === openChatId);
+  const box = $('messages');
+  box.querySelector('.seen-label')?.remove();
+  if (!c) return;
+  const theirRead = readMs(c, otherUid(c));
+  box.querySelectorAll('.bubble.me').forEach((b) => {
+    const state = b.dataset.pending ? 'pending' : theirRead >= Number(b.dataset.at) ? 'seen' : 'sent';
+    const t = b.querySelector('.ticks');
+    if (!t || t.dataset.state === state) return;
+    t.dataset.state = state;
+    t.innerHTML = ICONS[state];
+    t.title = TICK_LABEL[state];
+  });
+  const last = currentMsgs.at(-1);
+  if (last && last.from === me.uid && !last.pending && theirRead >= toDate(last.at).getTime()) {
+    const d = new Date(theirRead);
+    const label = document.createElement('div');
+    label.className = 'seen-label';
+    label.textContent = d.toDateString() === new Date().toDateString()
+      ? `Vu à ${hhmm(d)}`
+      : `Vu ${dayLabel(d).toLowerCase()} à ${hhmm(d)}`;
+    box.append(label);
+    keepBottom();
+  }
+}
+
+// Dit à ton ami que tu as vu ses messages (seulement si la page est vraiment affichée)
+const seenWriting = new Set();
+function markSeen(chatId) {
+  if (!chatId || chatId !== openChatId || document.visibilityState !== 'visible') return;
+  const c = chats.find((x) => x.id === chatId);
+  if (!c?.accepted || seenWriting.has(chatId)) return;
+  const lastTheirs = currentMsgs.findLast((m) => m.from !== me.uid);
+  if (!lastTheirs || readMs(c, me.uid) >= toDate(lastTheirs.at).getTime()) return;
+  seenWriting.add(chatId);
+  updateDoc(doc(db, 'chats', chatId), { [`reads.${me.uid}`]: serverTimestamp() })
+    .catch((err) => console.error('vu', err))
+    .finally(() => seenWriting.delete(chatId));
+}
+document.addEventListener('visibilitychange', () => markSeen(openChatId));
+window.addEventListener('focus', () => markSeen(openChatId));
+
+// ---------- Réagir à un message avec un emoji ----------
+const QUICK_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
+const MORE_EMOJIS = [
+  '🔥', '🥰', '😍', '😆', '🤣', '😊', '😎', '🤔', '😭', '😱', '🙏', '👏',
+  '🎉', '💯', '👀', '🤝', '💀', '🥳', '😴', '🤯', '👌', '✨', '💪', '😅',
+];
+
+function nameOfUid(uid) {
+  if (uid === me.uid) return 'Toi';
+  const c = chats.find((x) => x.id === openChatId);
+  return c?.names?.[uid] || '?';
+}
+
+// La petite bulle sous le message : ❤️😂 2
+function reactionsPill(m) {
+  const entries = Object.entries(m.reactions || {}).filter(([, e]) => typeof e === 'string' && e);
+  if (!entries.length) return null;
+  const pill = document.createElement('button');
+  pill.type = 'button';
+  pill.className = 'reacts' + (m.reactions[me.uid] ? ' mine' : '');
+  const distinct = [...new Set(entries.map(([, e]) => e))];
+  pill.textContent = distinct.join('') + (entries.length > 1 ? ` ${entries.length}` : '');
+  const who = entries.map(([uid, e]) => `${nameOfUid(uid)} : ${e}`).join(', ');
+  pill.title = who;
+  pill.setAttribute('aria-label', `Réactions — ${who}`);
+  return pill;
+}
+
+async function react(msgId, emoji) {
+  const chatId = openChatId;
+  const m = currentMsgs.find((x) => x.id === msgId);
+  if (!chatId || !m) return;
+  const same = m.reactions?.[me.uid] === emoji;
+  try {
+    await updateDoc(doc(db, 'chats', chatId, 'messages', msgId), {
+      [`reactions.${me.uid}`]: same ? deleteField() : emoji, // retoucher le même emoji le retire
+    });
+  } catch (err) {
+    console.error('réaction', err);
+    toast('Réaction pas envoyée. Réessaie.');
+  }
+}
+
+const reactPicker = document.createElement('div');
+reactPicker.className = 'react-picker';
+reactPicker.hidden = true;
+reactPicker.setAttribute('role', 'dialog');
+reactPicker.setAttribute('aria-label', 'Choisis un emoji');
+document.body.append(reactPicker);
+let pickerMsgId = null;
+
+function emojiButton(e, current) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = e;
+  b.setAttribute('aria-label', e);
+  b.setAttribute('aria-pressed', String(e === current));
+  b.onclick = () => { const id = pickerMsgId; closeReactPicker(); react(id, e); };
+  return b;
+}
+
+function openReactPicker(bubble) {
+  const msgId = bubble.dataset.id;
+  const m = currentMsgs.find((x) => x.id === msgId);
+  const c = chats.find((x) => x.id === openChatId);
+  if (!m || !c?.accepted) return;
+  closeReactPicker();
+  pickerMsgId = msgId;
+  const current = m.reactions?.[me.uid];
+  const row = document.createElement('div');
+  row.className = 'row';
+  for (const e of QUICK_EMOJIS) row.append(emojiButton(e, current));
+  const more = document.createElement('div');
+  more.className = 'more';
+  more.hidden = true;
+  for (const e of MORE_EMOJIS) more.append(emojiButton(e, current));
+  const plus = document.createElement('button');
+  plus.type = 'button';
+  plus.className = 'plus';
+  plus.title = 'Plus d’emojis';
+  plus.setAttribute('aria-label', 'Plus d’emojis');
+  plus.setAttribute('aria-expanded', 'false');
+  plus.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
+  plus.onclick = () => {
+    more.hidden = !more.hidden;
+    plus.setAttribute('aria-expanded', String(!more.hidden));
+    placePicker(bubble);
+  };
+  row.append(plus);
+  reactPicker.replaceChildren(row, more);
+  reactPicker.hidden = false;
+  placePicker(bubble);
+  bubble.classList.add('picking');
+  reactPicker.querySelector('button')?.focus({ preventScroll: true });
+}
+
+// Place le choix d'emojis juste au-dessus (ou en dessous) du message
+function placePicker(bubble) {
+  const r = bubble.getBoundingClientRect();
+  const w = reactPicker.offsetWidth;
+  const h = reactPicker.offsetHeight;
+  let top = r.top - h - 8;
+  if (top < 8) top = Math.min(r.bottom + 8, innerHeight - h - 8);
+  let left = bubble.classList.contains('me') ? r.right - w : r.left;
+  left = Math.max(8, Math.min(left, innerWidth - w - 8));
+  reactPicker.style.top = `${Math.max(8, top)}px`;
+  reactPicker.style.left = `${left}px`;
+}
+
+function closeReactPicker() {
+  if (reactPicker.hidden) return;
+  reactPicker.hidden = true;
+  pickerMsgId = null;
+  document.querySelectorAll('.bubble.picking').forEach((b) => b.classList.remove('picking'));
+}
+
+const messagesBox = $('messages');
+let pressTimer = null;
+let pressStart = null;
+let suppressClick = false;
+
+messagesBox.addEventListener('click', (e) => {
+  // Après un appui long, on n'ouvre pas la photo / le lien qui était sous le doigt
+  if (suppressClick) { suppressClick = false; e.preventDefault(); e.stopPropagation(); return; }
+  const btn = e.target.closest('.react-btn, .reacts');
+  if (!btn) return;
+  const bubble = btn.closest('.bubble');
+  if (pickerMsgId === bubble.dataset.id) closeReactPicker();
+  else openReactPicker(bubble);
+}, true);
+
+// Sur téléphone : appui long sur un message pour réagir
+messagesBox.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'mouse') return;
+  const bubble = e.target.closest('.bubble');
+  if (!bubble || e.target.closest('video, audio, .reacts, .react-btn')) return;
+  pressStart = { x: e.clientX, y: e.clientY };
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(() => {
+    pressTimer = null;
+    suppressClick = true;
+    setTimeout(() => { suppressClick = false; }, 600);
+    navigator.vibrate?.(12);
+    openReactPicker(bubble);
+  }, 450);
+});
+const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; };
+messagesBox.addEventListener('pointerup', cancelPress);
+messagesBox.addEventListener('pointercancel', cancelPress);
+messagesBox.addEventListener('pointermove', (e) => {
+  if (pressTimer && pressStart && Math.hypot(e.clientX - pressStart.x, e.clientY - pressStart.y) > 10) cancelPress();
+});
+// Sur téléphone, l'appui long ouvre les emojis au lieu du menu du navigateur
+messagesBox.addEventListener('contextmenu', (e) => {
+  if (matchMedia('(pointer: coarse)').matches && e.target.closest('.bubble')) e.preventDefault();
+});
+
+document.addEventListener('pointerdown', (e) => {
+  if (!reactPicker.hidden && !reactPicker.contains(e.target) && !e.target.closest('.react-btn, .reacts')) closeReactPicker();
+});
+messagesBox.addEventListener('scroll', closeReactPicker);
+window.addEventListener('resize', closeReactPicker);
+
+// Envoie un fichier : d'abord dans Firebase Storage, puis un message qui pointe dessus
+let currentUpload = null;
+let uploadCanceled = false;
+
+function showUpload(text, pct) {
+  $('uploadBar').hidden = false;
+  $('uploadLabel').textContent = text;
+  $('uploadProgress').value = pct;
+}
+
+async function sendFiles(files) {
+  const list = [...files];
+  if (!list.length || !openChatId) return;
+  const c = chats.find((x) => x.id === openChatId);
+  if (!c?.accepted) return;
+  const chatId = openChatId;
+  uploadCanceled = false;
+  for (let i = 0; i < list.length && !uploadCanceled; i++) {
+    const prefix = list.length > 1 ? `(${i + 1}/${list.length}) ` : '';
+    await sendOneFile(chatId, list[i], prefix);
+  }
+  currentUpload = null;
+  $('uploadBar').hidden = true;
+}
+
+async function sendOneFile(chatId, file, prefix) {
+  const msgRef = doc(collection(db, 'chats', chatId, 'messages'));
+  // Nom de fichier sans caractères gênants pour une adresse
+  const safeName = (file.name || 'fichier').replace(/[\/\\#?\[\]*%]/g, '_').slice(-150);
+  const path = `chats/${chatId}/${msgRef.id}/${safeName}`;
+  const type = file.type || 'application/octet-stream';
+  const name = (file.name || 'fichier').slice(0, 200);
+  showUpload(`${prefix}Envoi de ${name}…`, 0);
+  try {
+    const task = uploadBytesResumable(fileRef(storage, path), file, { contentType: type });
+    currentUpload = task;
+    task.on('state_changed', (s) => {
+      const pct = s.totalBytes ? (s.bytesTransferred / s.totalBytes) * 100 : 0;
+      showUpload(`${prefix}Envoi de ${name}… ${Math.round(pct)} % (${prettySize(s.totalBytes)})`, pct);
+    });
+    await task;
+    const url = await getDownloadURL(task.snapshot.ref);
+    const fileInfo = { url, path, name, type, size: file.size };
+    const batch = writeBatch(db);
+    batch.set(msgRef, { from: me.uid, text: '', at: serverTimestamp(), file: fileInfo });
+    batch.update(doc(db, 'chats', chatId), {
+      lastAt: serverTimestamp(),
+      lastText: fileLabel(fileInfo),
+      lastFrom: me.uid,
+    });
+    await batch.commit();
+  } catch (err) {
+    if (err.code === 'storage/canceled') { uploadCanceled = true; toast('Envoi annulé.'); return; }
+    console.error(err);
+    toast(err.code === 'storage/unauthorized' || err.code === 'storage/unknown'
+      ? `Impossible d’envoyer « ${name} » pour le moment.`
+      : `« ${name} » n’a pas pu être envoyé. Réessaie.`);
+  }
+}
+
+$('attachBtn').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => {
+  const files = [...e.target.files];
+  e.target.value = ''; // pour pouvoir renvoyer le même fichier ensuite
+  sendFiles(files);
+});
+$('uploadCancel').addEventListener('click', () => { uploadCanceled = true; currentUpload?.cancel(); });
+
+// Coller une image (Ctrl+V) dans la zone de texte l'envoie
+$('sendForm').text.addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); sendFiles(files); }
+});
+
+// Glisser-déposer des fichiers sur la conversation
+let dragDepth = 0;
+const chatInner = $('chatInner');
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+chatInner.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e) || $('sendForm').hidden) return;
+  e.preventDefault();
+  dragDepth++;
+  $('dropHint').hidden = false;
+});
+chatInner.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+chatInner.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('dropHint').hidden = true; } });
+chatInner.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $('dropHint').hidden = true;
+  if (!$('sendForm').hidden) sendFiles(e.dataTransfer.files);
+});
 
 // Envoyer un message
 const textarea = $('sendForm').text;
@@ -614,7 +1055,9 @@ $('removeBtn').addEventListener('click', () => {
   if (c) removeChat(c, true);
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && openChatId && !$('settings').open) closeChat();
+  if (e.key !== 'Escape') return;
+  if (!reactPicker.hidden) { closeReactPicker(); return; }
+  if (openChatId && !$('settings').open) closeChat();
 });
 
 // ---------- Personnaliser : mode nuit, couleur, fond, taille ----------

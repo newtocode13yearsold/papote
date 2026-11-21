@@ -187,14 +187,67 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
   line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--msg-size);
   background: var(--bubble-them); border: 1px solid var(--line);
   align-self: flex-start; border-bottom-left-radius: 6px;
-  animation: pop .15s ease-out;
+  position: relative;
 }
+.bubble.new { animation: pop .15s ease-out; }
 .bubble.me {
   align-self: flex-end; background: var(--bubble-me); color: var(--bubble-me-text);
   border-color: transparent; border-bottom-left-radius: 18px; border-bottom-right-radius: 6px;
 }
 .bubble time { display: block; font-size: 11px; opacity: .65; margin-top: 3px; text-align: right; }
 @keyframes pop { from { transform: translateY(4px); opacity: 0; } }
+
+/* ✓ envoyé / ✓✓ vu */
+.bubble time .ticks { display: inline-flex; vertical-align: -3px; margin-left: 3px; }
+.bubble time .ticks svg { width: 15px; height: 15px; stroke-width: 2.2; }
+.seen-label { align-self: flex-end; font-size: 12px; color: var(--muted); margin: 0 6px 2px; animation: pop .15s ease-out; }
+
+/* Réactions emoji */
+.bubble.has-reacts { margin-bottom: 14px; }
+.reacts {
+  position: absolute; bottom: -15px; right: 10px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  border-radius: 999px; padding: 1px 7px; font-size: 14px; line-height: 1.4;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .12); white-space: nowrap;
+  animation: pop .15s ease-out;
+}
+.bubble.me .reacts { right: auto; left: 10px; }
+.reacts.mine { border-color: var(--accent); background: var(--accent-soft); }
+.react-btn {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 42px; height: 42px; padding: 0; border-radius: 50%;
+  border: 6px solid transparent; background: var(--panel); background-clip: padding-box;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--muted); display: grid; place-items: center;
+  opacity: 0; transition: opacity .12s;
+}
+.react-btn svg { width: 18px; height: 18px; }
+.react-btn:hover { color: var(--accent-text); }
+.bubble:not(.me) .react-btn { left: 100%; }
+.bubble.me .react-btn { right: 100%; }
+.bubble:hover .react-btn, .bubble.picking .react-btn, .react-btn:focus-visible { opacity: 1; }
+@media (pointer: coarse) {
+  .react-btn { display: none; }
+  /* Appui long pour réagir : pas de sélection de texte ni de menu iPhone */
+  .messages .bubble { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+}
+.bubble.picking { box-shadow: 0 0 0 2px var(--accent-soft); }
+
+.react-picker {
+  position: fixed; z-index: 20; padding: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 24px;
+  box-shadow: var(--shadow); animation: rise .15s ease-out;
+}
+.react-picker .row { display: flex; gap: 2px; }
+.react-picker .more { display: grid; grid-template-columns: repeat(6, 40px); gap: 2px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+.react-picker button {
+  width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: none;
+  font-size: 24px; line-height: 1; display: grid; place-items: center; color: var(--muted);
+  transition: transform .1s, background-color .1s;
+}
+.react-picker button:hover { background: var(--panel-2); transform: scale(1.15); }
+.react-picker button[aria-pressed="true"] { background: var(--accent-soft); }
+.react-picker .plus[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); }
 
 .pending-note { margin: 0 16px 12px; padding: 12px 14px; background: var(--accent-soft); border-radius: 14px; font-size: 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pending-note span { flex: 1; min-width: 180px; }
@@ -205,6 +258,44 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
   background: var(--panel); border-top: 1px solid var(--line);
 }
 .composer textarea { resize: none; max-height: 140px; border-radius: 20px; padding: 11px 16px; line-height: 1.35; }
+.attach { width: 46px; height: 46px; border-radius: 50%; }
+.attach svg { width: 22px; height: 22px; }
+
+/* Envoi de fichiers en cours */
+.upload-bar {
+  display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+  background: var(--panel); border-top: 1px solid var(--line); font-size: 14px;
+}
+.upload-bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-bar progress { width: 35%; accent-color: var(--accent); }
+.chat-inner { position: relative; }
+.drop-hint {
+  position: absolute; inset: 0; z-index: 5; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 3px dashed var(--accent); border-radius: 16px; margin: 8px;
+  font-size: 20px; font-weight: 700; color: var(--accent-text); pointer-events: none;
+}
+
+/* Photos, vidéos et fichiers dans les messages */
+.bubble.media { padding: 4px; }
+.bubble.media time { padding: 0 8px 4px; }
+.bubble .caption { padding: 6px 8px 0; }
+.bubble img, .bubble video {
+  display: block; max-width: 100%; max-height: 360px; border-radius: 14px; background: var(--panel-2);
+}
+.bubble img { cursor: zoom-in; }
+.bubble video { width: 360px; }
+.bubble audio { display: block; width: 280px; max-width: 100%; }
+.file-card {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px;
+  color: inherit; text-decoration: none; background: color-mix(in srgb, currentColor 8%, transparent);
+  min-width: 200px;
+}
+.file-card:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+.file-card svg { width: 28px; height: 28px; flex: none; }
+.file-card span { min-width: 0; }
+.file-card strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.file-card small { opacity: .75; font-size: 12px; }
 .send { width: 46px; height: 46px; padding: 0; border-radius: 50%; flex: none; }
 .send svg { width: 20px; height: 20px; }
 

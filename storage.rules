@@ -1,0 +1,24 @@
+rules_version = '2';
+
+// Règles des fichiers envoyés (photos, vidéos, fichiers).
+// Chaque fichier est rangé dans chats/{conversation}/{message}/{nom}.
+// Seuls les deux amis de la conversation peuvent l'envoyer et le voir.
+// Pas de limite de taille ni de type.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /chats/{chatId}/{msgId}/{fileName} {
+      function chat() {
+        return firestore.get(/databases/(default)/documents/chats/$(chatId)).data;
+      }
+
+      allow read: if request.auth != null && request.auth.uid in chat().members;
+
+      allow create: if request.auth != null
+        && request.auth.uid in chat().members
+        && chat().accepted == true;
+
+      // Un fichier envoyé ne peut pas être remplacé ni supprimé
+      allow update, delete: if false;
+    }
+  }
+}

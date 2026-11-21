@@ -80,8 +80,8 @@ service cloud.firestore {
 
       // Accepter la demande (seulement celui qui l'a reçue)
       // ou mettre à jour le "dernier message" (seulement un membre, conversation acceptée)
+      // ou dire "j'ai vu les messages" (chacun ne peut changer que SON heure de lecture)
       allow update: if signedIn() && isMember(resource.data)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accepted', 'lastAt', 'lastText', 'lastFrom'])
         && (
           (resource.data.accepted == false
             && resource.data.requestedBy != me()
@@ -89,11 +89,17 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accepted']))
           ||
           (resource.data.accepted == true
-            && request.resource.data.accepted == true
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastAt', 'lastText', 'lastFrom'])
             && request.resource.data.lastFrom == me()
             && request.resource.data.lastAt == request.time
             && request.resource.data.lastText is string
             && request.resource.data.lastText.size() <= 1000)
+          ||
+          (resource.data.accepted == true
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reads'])
+            && request.resource.data.reads is map
+            && request.resource.data.reads.diff(resource.data.get('reads', {})).affectedKeys().hasOnly([me()])
+            && request.resource.data.reads[me()] == request.time)
         );
 
       // Refuser une demande / retirer un ami
@@ -102,17 +108,43 @@ service cloud.firestore {
       match /messages/{msgId} {
         function chat() { return get(/databases/$(database)/documents/chats/$(chatId)).data; }
 
+        // Photo, vidéo ou fichier : rangé dans Storage sous chats/{chatId}/{msgId}/...
+        function validFile(f) {
+          return f is map
+            && f.keys().hasAll(['url', 'path', 'name', 'type', 'size'])
+            && f.keys().hasOnly(['url', 'path', 'name', 'type', 'size'])
+            && f.url is string && f.url.matches('^https://firebasestorage[.]googleapis[.]com/.*')
+            && f.path is string && f.path.matches('^chats/' + chatId + '/' + msgId + '/[^/]+$')
+            && f.name is string && f.name.size() > 0 && f.name.size() <= 200
+            && f.type is string && f.type.size() <= 200
+            && f.size is int && f.size >= 0;
+        }
+
         allow read: if signedIn() && me() in chat().members;
         allow create: if signedIn()
           && me() in chat().members
           && chat().accepted == true
-          && request.resource.data.keys().hasOnly(['from', 'text', 'at'])
+          && request.resource.data.keys().hasOnly(['from', 'text', 'at', 'file'])
           && request.resource.data.from == me()
           && request.resource.data.text is string
-          && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 1000
-          && request.resource.data.at == request.time;
-        allow update, delete: if false;
+          && request.resource.data.at == request.time
+          && ('file' in request.resource.data
+                ? validFile(request.resource.data.file)
+                : request.resource.data.text.size() > 0);
+
+        // Réagir avec un emoji : chacun ne peut changer (ou retirer) que SA réaction
+        allow update: if signedIn()
+          && me() in chat().members
+          && chat().accepted == true
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+          && request.resource.data.reactions is map
+          && request.resource.data.reactions.diff(resource.data.get('reactions', {})).affectedKeys().hasOnly([me()])
+          && (!(me() in request.resource.data.reactions)
+                || (request.resource.data.reactions[me()] is string
+                    && request.resource.data.reactions[me()].size() > 0
+                    && request.resource.data.reactions[me()].size() <= 16));
+        allow delete: if false;
       }
     }
   }
